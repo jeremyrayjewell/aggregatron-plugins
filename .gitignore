@@ -1,0 +1,25 @@
+/build/
+/out/
+/.vs/
+/.vscode/
+/.idea/
+/JUCE/
+
+*.user
+*.suo
+*.vcxproj.user
+*.opensdf
+*.sdf
+*.DS_Store
+
+# Common JUCE / plugin output locations when building outside /build
+*.pdb
+*.ilk
+*.dll
+*.lib
+*.exp
+*.exe
+*.app
+*.component
+*.vst3
+*.aaxplugin
