@@ -11,6 +11,93 @@ juce::Font createFontFromBinary(const char* data, int size, float height)
     return juce::Font(juce::FontOptions(height));
 }
 
+
+struct PitchMonitorState
+{
+    std::vector<float> samples;
+    float detectedHz = 0.0f;
+    float rms = 0.0f;
+    float centsOffset = 0.0f;
+    int midiNote = -1;
+    bool hasPitch = false;
+};
+
+float estimatePitchFromRecentOutput(const std::vector<float>& samples, double sampleRate, float& outRms)
+{
+    outRms = 0.0f;
+    if (samples.empty() || sampleRate <= 0.0)
+        return 0.0f;
+
+    const auto analysisSize = juce::jmin<int>(static_cast<int>(samples.size()), juce::roundToInt(sampleRate * 0.12));
+    if (analysisSize < 512)
+        return 0.0f;
+
+    const auto startIndex = static_cast<int>(samples.size()) - analysisSize;
+    double sumSquares = 0.0;
+    for (int i = 0; i < analysisSize; ++i)
+    {
+        const auto sample = samples[static_cast<size_t>(startIndex + i)];
+        sumSquares += static_cast<double>(sample) * static_cast<double>(sample);
+    }
+
+    outRms = static_cast<float>(std::sqrt(sumSquares / static_cast<double>(analysisSize)));
+    if (outRms < 0.01f)
+        return 0.0f;
+
+    constexpr double minFrequency = 55.0;
+    constexpr double maxFrequency = 1760.0;
+    const auto minLag = juce::jmax(2, juce::roundToInt(sampleRate / maxFrequency));
+    const auto maxLag = juce::jmin(analysisSize - 2, juce::roundToInt(sampleRate / minFrequency));
+    if (maxLag <= minLag)
+        return 0.0f;
+
+    auto scoreForLag = [&](int lag)
+    {
+        double correlation = 0.0;
+        double energyA = 0.0;
+        double energyB = 0.0;
+
+        for (int i = 0; i < analysisSize - lag; ++i)
+        {
+            const auto a = static_cast<double>(samples[static_cast<size_t>(startIndex + i)]);
+            const auto b = static_cast<double>(samples[static_cast<size_t>(startIndex + i + lag)]);
+            correlation += a * b;
+            energyA += a * a;
+            energyB += b * b;
+        }
+
+        const auto normaliser = std::sqrt(energyA * energyB);
+        return normaliser > 0.0 ? correlation / normaliser : 0.0;
+    };
+
+    double bestScore = 0.0;
+    int bestLag = 0;
+    for (int lag = minLag; lag <= maxLag; lag += (lag < 128 ? 1 : 2))
+    {
+        const auto score = scoreForLag(lag);
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestLag = lag;
+        }
+    }
+
+    if (bestLag == 0 || bestScore < 0.70)
+        return 0.0f;
+
+    return static_cast<float>(sampleRate / static_cast<double>(bestLag));
+}
+
+juce::String formatPitchStatus(const PitchMonitorState& state)
+{
+    if (! state.hasPitch)
+        return state.rms > 0.01f ? "Pitch monitor: unstable" : "Pitch monitor: waiting for output";
+
+    const auto noteName = juce::MidiMessage::getMidiNoteName(state.midiNote, true, true, 4);
+    const auto centsText = juce::String(state.centsOffset, 1);
+    return noteName + "  " + centsText + " cents  " + juce::String(state.detectedHz, 1) + " Hz";
+}
+
 int keyPressToMidiNote(const juce::KeyPress& key)
 {
     static const std::vector<std::pair<juce::juce_wchar, int>> mapping
@@ -61,6 +148,79 @@ void OutlinedMapLabel::paint(juce::Graphics& g)
     g.fillPath(transformed);
 }
 
+
+class AggregaMapAudioProcessorEditor::PitchMonitorCanvas : public juce::Component
+{
+public:
+    void setState(PitchMonitorState newState)
+    {
+        state = std::move(newState);
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+        g.setColour(juce::Colours::black);
+        g.fillRoundedRectangle(bounds, 18.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.12f));
+        g.drawRoundedRectangle(bounds.reduced(0.5f), 18.0f, 1.0f);
+
+        auto inner = bounds.reduced(12.0f);
+        auto waveformArea = inner.removeFromTop(bounds.getHeight() * 0.55f);
+        g.setColour(juce::Colours::white.withAlpha(0.08f));
+        g.drawHorizontalLine(juce::roundToInt(waveformArea.getCentreY()), waveformArea.getX(), waveformArea.getRight());
+
+        if (! state.samples.empty())
+        {
+            juce::Path waveform;
+            const auto width = juce::jmax(1, static_cast<int>(waveformArea.getWidth()));
+            for (int x = 0; x < width; ++x)
+            {
+                const auto sampleIndex = juce::jlimit(0, static_cast<int>(state.samples.size()) - 1,
+                    juce::roundToInt((static_cast<float>(x) / static_cast<float>(juce::jmax(1, width - 1))) * static_cast<float>(state.samples.size() - 1)));
+                const auto sample = juce::jlimit(-1.0f, 1.0f, state.samples[static_cast<size_t>(sampleIndex)]);
+                const auto y = juce::jmap(sample, -1.0f, 1.0f, waveformArea.getBottom(), waveformArea.getY());
+                if (x == 0)
+                    waveform.startNewSubPath(waveformArea.getX(), y);
+                else
+                    waveform.lineTo(waveformArea.getX() + static_cast<float>(x), y);
+            }
+
+            g.setColour(juce::Colours::deepskyblue.withAlpha(0.95f));
+            g.strokePath(waveform, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        }
+
+        auto textArea = inner.toNearestInt();
+        g.setColour(juce::Colours::white);
+        g.setFont(juce::FontOptions(22.0f));
+        g.drawFittedText(state.hasPitch ? juce::MidiMessage::getMidiNoteName(state.midiNote, true, true, 4) : "--", textArea.removeFromTop(28), juce::Justification::centredLeft, 1);
+        g.setFont(juce::FontOptions(16.0f));
+        g.drawFittedText(state.hasPitch ? juce::String(state.detectedHz, 1) + " Hz" : "No stable pitch", textArea.removeFromTop(22), juce::Justification::centredLeft, 1);
+
+        auto meterArea = textArea.removeFromTop(18).toFloat();
+        g.setColour(juce::Colours::white.withAlpha(0.10f));
+        g.fillRoundedRectangle(meterArea, 8.0f);
+        const auto normalizedCents = juce::jlimit(-1.0f, 1.0f, state.centsOffset / 50.0f);
+        const auto centerX = meterArea.getCentreX();
+        g.setColour(juce::Colours::white.withAlpha(0.25f));
+        g.drawVerticalLine(juce::roundToInt(centerX), meterArea.getY(), meterArea.getBottom());
+        if (state.hasPitch)
+        {
+            const auto markerX = centerX + normalizedCents * (meterArea.getWidth() * 0.5f - 8.0f);
+            g.setColour(std::abs(state.centsOffset) < 8.0f ? juce::Colours::mediumspringgreen : juce::Colours::orange);
+            g.fillRoundedRectangle(juce::Rectangle<float>(markerX - 6.0f, meterArea.getY() + 2.0f, 12.0f, meterArea.getHeight() - 4.0f), 4.0f);
+        }
+
+        g.setColour(juce::Colours::white.withAlpha(0.7f));
+        g.setFont(juce::FontOptions(14.0f));
+        g.drawFittedText(state.hasPitch ? juce::String(state.centsOffset, 1) + " cents" : "Play a steady note to verify tuning", textArea, juce::Justification::centredLeft, 2);
+    }
+
+private:
+    PitchMonitorState state;
+};
+
 AggregaMapAudioProcessorEditor::AggregaMapAudioProcessorEditor(AggregaMapAudioProcessor& p)
     : AudioProcessorEditor(&p),
       audioProcessor(p),
@@ -96,6 +256,20 @@ AggregaMapAudioProcessorEditor::AggregaMapAudioProcessorEditor(AggregaMapAudioPr
     statusLabel.setText(audioProcessor.getAnalysisSummary(), juce::dontSendNotification);
     addAndMakeVisible(statusLabel);
 
+    pitchMonitorLabel.setText("Output Pitch", juce::dontSendNotification);
+    pitchMonitorLabel.setFont(bodyFont);
+    pitchMonitorLabel.setJustificationType(juce::Justification::centredLeft);
+    pitchMonitorLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    addAndMakeVisible(pitchMonitorLabel);
+
+    pitchMonitorStatusLabel.setFont(bodyFont);
+    pitchMonitorStatusLabel.setJustificationType(juce::Justification::centredLeft);
+    pitchMonitorStatusLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    pitchMonitorStatusLabel.setColour(juce::Label::backgroundColourId, juce::Colours::black);
+    pitchMonitorStatusLabel.setOpaque(true);
+    pitchMonitorStatusLabel.setText("Pitch monitor: waiting for output", juce::dontSendNotification);
+    addAndMakeVisible(pitchMonitorStatusLabel);
+
     minSegmentLabel.setText("Min Segment", juce::dontSendNotification);
     minSegmentLabel.setFont(bodyFont);
     minSegmentLabel.setJustificationType(juce::Justification::centredLeft);
@@ -123,6 +297,8 @@ AggregaMapAudioProcessorEditor::AggregaMapAudioProcessorEditor(AggregaMapAudioPr
 
     configureSegmentSlider(minSegmentSlider);
     configureSegmentSlider(maxSegmentSlider);
+    pitchMonitorCanvas = std::make_unique<PitchMonitorCanvas>();
+    addAndMakeVisible(*pitchMonitorCanvas);
     minSegmentAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(audioProcessor.getParameters(), "minSegmentMs", minSegmentSlider);
     maxSegmentAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(audioProcessor.getParameters(), "maxSegmentMs", maxSegmentSlider);
 
@@ -208,6 +384,33 @@ void AggregaMapAudioProcessorEditor::releaseStaleHeldKeys()
     }
 }
 
+void AggregaMapAudioProcessorEditor::updatePitchMonitor()
+{
+    if (pitchMonitorCanvas == nullptr)
+        return;
+
+    std::vector<float> recentOutput;
+    double sampleRate = 0.0;
+    PitchMonitorState state;
+
+    if (audioProcessor.getRecentOutputForVisualisation(recentOutput, sampleRate))
+    {
+        state.samples = std::move(recentOutput);
+        state.detectedHz = estimatePitchFromRecentOutput(state.samples, sampleRate, state.rms);
+        if (state.detectedHz > 0.0f)
+        {
+            const auto midiNote = static_cast<int>(std::round(69.0 + 12.0 * std::log2(static_cast<double>(state.detectedHz) / 440.0)));
+            const auto noteFrequency = 440.0 * std::pow(2.0, (static_cast<double>(midiNote) - 69.0) / 12.0);
+            state.midiNote = juce::jlimit(0, 127, midiNote);
+            state.centsOffset = static_cast<float>(1200.0 * std::log2(static_cast<double>(state.detectedHz) / noteFrequency));
+            state.hasPitch = true;
+        }
+    }
+
+    pitchMonitorStatusLabel.setText(formatPitchStatus(state), juce::dontSendNotification);
+    pitchMonitorCanvas->setState(std::move(state));
+}
+
 void AggregaMapAudioProcessorEditor::timerCallback()
 {
     const auto loading = audioProcessor.isLoadingSource();
@@ -217,6 +420,8 @@ void AggregaMapAudioProcessorEditor::timerCallback()
 
     if (! loading)
         releaseStaleHeldKeys();
+
+    updatePitchMonitor();
 
     if (statusText != lastStatusText)
     {
@@ -231,6 +436,10 @@ void AggregaMapAudioProcessorEditor::timerCallback()
         hintLabel.setVisible(! loading);
         versionLabel.setVisible(! loading);
         statusLabel.setVisible(! loading);
+        pitchMonitorLabel.setVisible(! loading);
+        pitchMonitorStatusLabel.setVisible(! loading);
+        if (pitchMonitorCanvas != nullptr)
+            pitchMonitorCanvas->setVisible(! loading);
         minSegmentLabel.setVisible(! loading);
         maxSegmentLabel.setVisible(! loading);
         minSegmentSlider.setVisible(! loading);
@@ -327,7 +536,13 @@ void AggregaMapAudioProcessorEditor::resized()
     levelMatchToggle.setBounds(topLine.removeFromRight(180).reduced(6, 4));
     hintLabel.setBounds(header);
 
-    auto infoArea = area.removeFromTop(220);
+    auto infoArea = area.removeFromTop(250);
+    auto pitchArea = infoArea.removeFromRight(330).reduced(10, 0);
+    pitchMonitorLabel.setBounds(pitchArea.removeFromTop(28));
+    pitchMonitorStatusLabel.setBounds(pitchArea.removeFromTop(42));
+    if (pitchMonitorCanvas != nullptr)
+        pitchMonitorCanvas->setBounds(pitchArea);
+
     auto statusArea = infoArea.removeFromTop(118);
     statusLabel.setBounds(statusArea.reduced(10));
 
@@ -351,6 +566,4 @@ void AggregaMapAudioProcessorEditor::resized()
 
     keyboardComponent.setKeyWidth(static_cast<float>(keyboardComponent.getWidth()) / static_cast<float>(juce::jmax(1, whiteKeys)));
 }
-
-
 

@@ -19,10 +19,10 @@ endif()
 
 juce_add_binary_data(AggregatronAssets
     SOURCES
-        bg.png
-        knob.png
-        slider.png
-        font.ttf
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/bg.png
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/knob.png
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/slider.png
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/font.ttf
 )
 
 juce_add_plugin(AggregatronKeys
@@ -132,3 +132,24 @@ target_link_libraries(AggregaMap
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
 )
+
+add_executable(AggregaMapDebug
+    samplemap/MapAnalysis.cpp
+    samplemap/MapAnalysis.h
+    samplemap/MapDebug.cpp
+)
+
+target_compile_definitions(AggregaMapDebug
+    PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+)
+
+target_link_libraries(AggregaMapDebug
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_core
+        juce::juce_events
+)
+

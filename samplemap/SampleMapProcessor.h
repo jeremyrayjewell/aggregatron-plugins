@@ -65,6 +65,9 @@ public:
     bool startLoadingSourceFile(const juce::File& file);
     bool isLoadingSource() const noexcept { return loadingSource.load(); }
     float getLoadingProgress() const noexcept { return loadingProgress.load(); }
+    bool getRecentOutputForVisualisation(std::vector<float>& dest, double& sampleRate) const;
+    static std::vector<Region> stabiliseDetectedRegions(std::vector<Region> regions);
+    static void rebuildAssignmentsFromRegions(const std::vector<Region>& regions, std::array<NoteAssignment, 128>& assignments);
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
@@ -73,10 +76,12 @@ private:
     void setAnalysisSummary(const juce::String& summary);
     void joinLoaderThread();
     void performLoad(const juce::File& file);
+    void pushOutputSnapshot(const juce::AudioBuffer<float>& buffer);
 
     juce::AudioProcessorValueTreeState parameters;
     juce::CriticalSection synthLock;
     mutable juce::CriticalSection stateLock;
+    mutable juce::CriticalSection outputMonitorLock;
     juce::Synthesiser synth;
     juce::MidiKeyboardState keyboardState;
     juce::AudioFormatManager formatManager;
@@ -85,7 +90,10 @@ private:
     std::vector<Region> detectedRegions;
     juce::String loadedFileName;
     juce::String analysisSummary { "Load a WAV or MP3 to build the note map." };
+    double loadedSourceSampleRate = 44100.0;
     double currentSampleRate = 44100.0;
+    std::vector<float> recentOutputSamples;
+    int recentOutputWritePosition = 0;
     std::thread loaderThread;
     std::atomic<bool> loadingSource { false };
     std::atomic<float> loadingProgress { 0.0f };

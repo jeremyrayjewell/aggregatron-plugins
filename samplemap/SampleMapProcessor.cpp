@@ -23,9 +23,23 @@ float estimateRms(const float* data, int start, int length)
     return static_cast<float>(std::sqrt(sum / static_cast<double>(length)));
 }
 
+int normaliseMidiForMapping(int midi)
+{
+    constexpr int preferredLow = 48;
+    constexpr int preferredHigh = 64;
+
+    while (midi > preferredHigh)
+        midi -= 12;
+
+    while (midi < preferredLow)
+        midi += 12;
+
+    return juce::jlimit(0, 127, midi);
+}
+
 float estimatePitchHz(const float* data, int start, int length, double sampleRate)
 {
-    constexpr float minFrequency = 55.0f;
+    constexpr float minFrequency = 40.0f;
     constexpr float maxFrequency = 1760.0f;
 
     const auto minLag = std::max(2, static_cast<int>(sampleRate / maxFrequency));
@@ -56,12 +70,17 @@ float estimatePitchHz(const float* data, int start, int length, double sampleRat
         return correlation / normaliser;
     };
 
+    std::vector<std::pair<int, double>> lagScores;
+    lagScores.reserve(static_cast<size_t>(maxLag - minLag + 1));
+
     double bestCorrelation = 0.0;
     int bestLag = 0;
 
     for (int lag = minLag; lag <= maxLag;)
     {
         const auto score = correlationScoreForLag(lag);
+        lagScores.emplace_back(lag, score);
+
         if (score > bestCorrelation)
         {
             bestCorrelation = score;
@@ -74,17 +93,14 @@ float estimatePitchHz(const float* data, int start, int length, double sampleRat
     if (bestLag == 0 || bestCorrelation < 0.72)
         return 0.0f;
 
-    for (int divisor = 2; divisor <= 4; ++divisor)
+    const auto preferredThreshold = std::max(0.52, bestCorrelation * 0.68);
+    for (auto it = lagScores.rbegin(); it != lagScores.rend(); ++it)
     {
-        const auto candidateLag = bestLag / divisor;
-        if (candidateLag < minLag)
-            continue;
-
-        const auto candidateScore = correlationScoreForLag(candidateLag);
-        if (candidateScore >= bestCorrelation * 0.94)
+        if (it->second >= preferredThreshold)
         {
-            bestLag = candidateLag;
-            bestCorrelation = candidateScore;
+            bestLag = it->first;
+            bestCorrelation = it->second;
+            break;
         }
     }
 
@@ -95,8 +111,9 @@ class MappedSampleSound : public juce::SynthesiserSound
 {
 public:
     MappedSampleSound(std::array<AggregaMapAudioProcessor::NoteAssignment, 128> assignmentsToCopy,
-                      std::shared_ptr<juce::AudioBuffer<float>> sourceToShare)
-        : assignments(std::move(assignmentsToCopy)), source(std::move(sourceToShare))
+                      std::shared_ptr<juce::AudioBuffer<float>> sourceToShare,
+                      double sourceSampleRateToUse)
+        : assignments(std::move(assignmentsToCopy)), source(std::move(sourceToShare)), sourceSampleRate(sourceSampleRateToUse)
     {
     }
 
@@ -105,10 +122,12 @@ public:
 
     const auto& getAssignments() const noexcept { return assignments; }
     std::shared_ptr<juce::AudioBuffer<float>> getSource() const noexcept { return source; }
+    double getSourceSampleRate() const noexcept { return sourceSampleRate; }
 
 private:
     std::array<AggregaMapAudioProcessor::NoteAssignment, 128> assignments;
     std::shared_ptr<juce::AudioBuffer<float>> source;
+    double sourceSampleRate = 44100.0;
 };
 
 class MappedSampleVoice : public juce::SynthesiserVoice
@@ -153,7 +172,9 @@ public:
 
         const auto sourceFrequency = midiToFrequency(static_cast<double>(assignment.rootMidiNote));
         const auto targetFrequency = midiToFrequency(static_cast<double>(midiNoteNumber));
-        step = targetFrequency / sourceFrequency;
+        const auto playbackSampleRate = getSampleRate() > 0.0 ? getSampleRate() : 44100.0;
+        const auto sourceSampleRate = mappedSound->getSourceSampleRate() > 0.0 ? mappedSound->getSourceSampleRate() : 44100.0;
+        step = (targetFrequency / sourceFrequency) * (sourceSampleRate / playbackSampleRate);
         noteLevelCompensation = assignment.levelCompensation;
 
         juce::ADSR::Parameters env;
@@ -215,8 +236,8 @@ public:
             }
 
             const auto levelMatchEnabled = parameters.getRawParameterValue("levelMatch")->load() >= 0.5f;
-        const auto assignmentGain = levelMatchEnabled ? noteLevelCompensation : 1.0f;
-        sample *= adsr.getNextSample() * level * assignmentGain * parameters.getRawParameterValue("gain")->load();
+            const auto assignmentGain = levelMatchEnabled ? noteLevelCompensation : 1.0f;
+            sample *= adsr.getNextSample() * level * assignmentGain * parameters.getRawParameterValue("gain")->load();
 
             for (int channel = 0; channel < outputBuffer.getNumChannels(); ++channel)
                 outputBuffer.addSample(channel, start + i, sample);
@@ -249,7 +270,7 @@ AggregaMapAudioProcessor::AggregaMapAudioProcessor()
         synth.addVoice(new MappedSampleVoice(parameters));
 
     loadedBuffer = std::make_shared<juce::AudioBuffer<float>>();
-    synth.addSound(new MappedSampleSound(noteAssignments, loadedBuffer));
+    synth.addSound(new MappedSampleSound(noteAssignments, loadedBuffer, loadedSourceSampleRate));
 }
 
 AggregaMapAudioProcessor::~AggregaMapAudioProcessor()
@@ -261,7 +282,13 @@ void AggregaMapAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBl
 {
     currentSampleRate = sampleRate;
     synth.setCurrentPlaybackSampleRate(sampleRate);
-    juce::ignoreUnused(samplesPerBlock);
+
+    const auto historySize = juce::jmax(samplesPerBlock * 4, juce::roundToInt(sampleRate * 2.0));
+    {
+        const juce::ScopedLock lock(outputMonitorLock);
+        recentOutputSamples.assign(static_cast<size_t>(historySize), 0.0f);
+        recentOutputWritePosition = 0;
+    }
 }
 
 void AggregaMapAudioProcessor::releaseResources()
@@ -286,6 +313,8 @@ void AggregaMapAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     const juce::ScopedLock lock(synthLock);
     keyboardState.processNextMidiBuffer(midiMessages, 0, buffer.getNumSamples(), true);
     synth.renderNextBlock(buffer, midiMessages, 0, buffer.getNumSamples());
+
+    pushOutputSnapshot(buffer);
 }
 
 juce::AudioProcessorEditor* AggregaMapAudioProcessor::createEditor()
@@ -334,6 +363,40 @@ bool AggregaMapAudioProcessor::hasLoadedSource() const noexcept
 {
     const juce::ScopedLock lock(stateLock);
     return loadedBuffer != nullptr && loadedBuffer->getNumSamples() > 0 && ! detectedRegions.empty();
+}
+
+bool AggregaMapAudioProcessor::getRecentOutputForVisualisation(std::vector<float>& dest, double& sampleRate) const
+{
+    const juce::ScopedLock lock(outputMonitorLock);
+    if (recentOutputSamples.empty())
+        return false;
+
+    dest.resize(recentOutputSamples.size());
+    const auto writePosition = juce::jlimit(0, static_cast<int>(recentOutputSamples.size()) - 1, recentOutputWritePosition);
+
+    std::copy(recentOutputSamples.begin() + writePosition, recentOutputSamples.end(), dest.begin());
+    std::copy(recentOutputSamples.begin(), recentOutputSamples.begin() + writePosition, dest.begin() + (recentOutputSamples.size() - static_cast<size_t>(writePosition)));
+    sampleRate = currentSampleRate;
+    return true;
+}
+
+void AggregaMapAudioProcessor::pushOutputSnapshot(const juce::AudioBuffer<float>& buffer)
+{
+    const juce::ScopedLock lock(outputMonitorLock);
+    if (recentOutputSamples.empty())
+        return;
+
+    const auto numChannels = juce::jmax(1, buffer.getNumChannels());
+    for (int sampleIndex = 0; sampleIndex < buffer.getNumSamples(); ++sampleIndex)
+    {
+        float mixedSample = 0.0f;
+        for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+            mixedSample += buffer.getSample(channel, sampleIndex);
+
+        mixedSample /= static_cast<float>(numChannels);
+        recentOutputSamples[static_cast<size_t>(recentOutputWritePosition)] = mixedSample;
+        recentOutputWritePosition = (recentOutputWritePosition + 1) % static_cast<int>(recentOutputSamples.size());
+    }
 }
 
 void AggregaMapAudioProcessor::joinLoaderThread()
@@ -405,6 +468,7 @@ void AggregaMapAudioProcessor::performLoad(const juce::File& file)
         const juce::ScopedLock state(stateLock);
         loadedFileName = file.getFileName();
         loadedBuffer = newBuffer;
+        loadedSourceSampleRate = reader->sampleRate;
         detectedRegions = newRegions;
         noteAssignments = newAssignments;
 
@@ -424,7 +488,7 @@ void AggregaMapAudioProcessor::performLoad(const juce::File& file)
     {
         const juce::ScopedLock lock(synthLock);
         synth.clearSounds();
-        synth.addSound(new MappedSampleSound(newAssignments, newBuffer));
+        synth.addSound(new MappedSampleSound(newAssignments, newBuffer, reader->sampleRate));
     }
 
     loadingProgress.store(1.0f);
@@ -446,8 +510,21 @@ std::vector<AggregaMapAudioProcessor::Region> AggregaMapAudioProcessor::analyseS
             mono.addFrom(0, 0, inputSource, 1, 0, inputSource.getNumSamples(), 1.0f);
         mono.applyGain(0.5f);
 
-        constexpr int frameSize = 2048;
-        constexpr int hopSize = 1024;
+        // Bias the detector toward fundamentals by reducing bright overtones.
+        auto* monoData = mono.getWritePointer(0);
+        const auto cutoffHz = 1200.0f;
+        const auto rc = 1.0f / (juce::MathConstants<float>::twoPi * cutoffHz);
+        const auto dt = 1.0f / static_cast<float>(inputSampleRate);
+        const auto alpha = dt / (rc + dt);
+        float filtered = monoData[0];
+        for (int i = 1; i < mono.getNumSamples(); ++i)
+        {
+            filtered += alpha * (monoData[i] - filtered);
+            monoData[i] = filtered;
+        }
+
+        constexpr int frameSize = 4096;
+        constexpr int hopSize = 2048;
         const auto* data = mono.getReadPointer(0);
 
         struct FrameInfo { int midi = -1; int start = 0; int length = 0; float rms = 0.0f; };
@@ -480,8 +557,9 @@ std::vector<AggregaMapAudioProcessor::Region> AggregaMapAudioProcessor::analyseS
                 continue;
             }
 
-            const auto midi = juce::roundToInt(69.0 + 12.0 * std::log2(static_cast<double>(pitchHz) / 440.0));
-            frames.push_back({ juce::jlimit(0, 127, midi), start, frameSize, rms });
+            const auto detectedMidi = juce::roundToInt(69.0 + 12.0 * std::log2(static_cast<double>(pitchHz) / 440.0));
+            const auto midi = normaliseMidiForMapping(detectedMidi);
+            frames.push_back({ midi, start, frameSize, rms });
         }
 
         if (frames.empty())
@@ -539,18 +617,7 @@ std::vector<AggregaMapAudioProcessor::Region> AggregaMapAudioProcessor::analyseS
         const auto& lastFrame = frames.back();
         flushRegion(currentMidi, regionStart, lastFrame.start + lastFrame.length, rmsCount > 0 ? rmsAccumulator / static_cast<float>(rmsCount) : 0.0f);
 
-        std::sort(localRegions.begin(), localRegions.end(), [](const Region& a, const Region& b)
-        {
-            if (a.rootMidiNote != b.rootMidiNote)
-                return a.rootMidiNote < b.rootMidiNote;
-
-            if (a.startSample != b.startSample)
-                return a.startSample < b.startSample;
-
-            return a.rms > b.rms;
-        });
-
-        return localRegions;
+        return AggregaMapAudioProcessor::stabiliseDetectedRegions(std::move(localRegions));
     };
 
     const auto configuredMinSegmentSamples = juce::jmax(1, static_cast<int>(sourceSampleRate * (getMinSegmentMs() * 0.001f)));
@@ -566,7 +633,67 @@ std::vector<AggregaMapAudioProcessor::Region> AggregaMapAudioProcessor::analyseS
     return analyseWithSettings(source, sourceSampleRate, fallbackMinSegmentSamples, fallbackMaxSegmentSamples);
 }
 
-void AggregaMapAudioProcessor::rebuildAssignments(const std::vector<Region>& regions, std::array<NoteAssignment, 128>& assignments) const
+std::vector<AggregaMapAudioProcessor::Region> AggregaMapAudioProcessor::stabiliseDetectedRegions(std::vector<Region> regions)
+{
+    if (! regions.empty())
+    {
+        constexpr int mappingLow = 48;
+        constexpr int mappingHigh = 72;
+
+        auto foldIntoMappingRange = [mappingLow, mappingHigh](int midi)
+        {
+            while (midi > mappingHigh)
+                midi -= 12;
+
+            while (midi < mappingLow)
+                midi += 12;
+
+            return std::clamp(midi, mappingLow, mappingHigh);
+        };
+
+        regions.front().rootMidiNote = foldIntoMappingRange(regions.front().rootMidiNote);
+        auto previousMidi = regions.front().rootMidiNote;
+
+        for (size_t i = 1; i < regions.size(); ++i)
+        {
+            auto bestMidi = foldIntoMappingRange(regions[i].rootMidiNote);
+            auto bestCost = std::numeric_limits<double>::max();
+
+            for (int octaveShift = -2; octaveShift <= 2; ++octaveShift)
+            {
+                const auto candidateMidi = foldIntoMappingRange(regions[i].rootMidiNote + (12 * octaveShift));
+
+                double cost = static_cast<double>(std::abs(candidateMidi - previousMidi));
+                if (candidateMidi < previousMidi - 2)
+                    cost += 24.0;
+
+                if (cost < bestCost)
+                {
+                    bestCost = cost;
+                    bestMidi = candidateMidi;
+                }
+            }
+
+            regions[i].rootMidiNote = bestMidi;
+            previousMidi = bestMidi;
+        }
+    }
+
+    std::sort(regions.begin(), regions.end(), [](const Region& a, const Region& b)
+    {
+        if (a.rootMidiNote != b.rootMidiNote)
+            return a.rootMidiNote < b.rootMidiNote;
+
+        if (a.rms != b.rms)
+            return a.rms > b.rms;
+
+        return a.startSample < b.startSample;
+    });
+
+    return regions;
+}
+
+void AggregaMapAudioProcessor::rebuildAssignmentsFromRegions(const std::vector<Region>& regions, std::array<NoteAssignment, 128>& assignments)
 {
     for (auto& assignment : assignments)
         assignment = {};
@@ -584,8 +711,8 @@ void AggregaMapAudioProcessor::rebuildAssignments(const std::vector<Region>& reg
 
     for (int midi = 0; midi < static_cast<int>(assignments.size()); ++midi)
     {
+        const Region* best = nullptr;
         int bestDistance = std::numeric_limits<int>::max();
-        std::vector<const Region*> candidates;
 
         for (const auto& region : regions)
         {
@@ -593,24 +720,29 @@ void AggregaMapAudioProcessor::rebuildAssignments(const std::vector<Region>& reg
             if (distance < bestDistance)
             {
                 bestDistance = distance;
-                candidates.clear();
-                candidates.push_back(&region);
+                best = &region;
+                continue;
             }
-            else if (distance == bestDistance)
+
+            if (distance == bestDistance && best != nullptr)
             {
-                candidates.push_back(&region);
+                if (region.rms > best->rms || (region.rms == best->rms && region.startSample < best->startSample))
+                    best = &region;
             }
         }
 
-        if (candidates.empty())
+        if (best == nullptr)
             continue;
 
-        const auto candidateIndex = static_cast<size_t>(std::abs(midi)) % candidates.size();
-        const auto* best = candidates[candidateIndex];
         const auto safeRegionRms = juce::jmax(0.0001f, best->rms);
         const auto levelCompensation = juce::jlimit(0.35f, 3.0f, referenceRms / safeRegionRms);
         assignments[static_cast<size_t>(midi)] = { best->rootMidiNote, best->startSample, best->endSample, levelCompensation, true };
     }
+}
+
+void AggregaMapAudioProcessor::rebuildAssignments(const std::vector<Region>& regions, std::array<NoteAssignment, 128>& assignments) const
+{
+    rebuildAssignmentsFromRegions(regions, assignments);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout AggregaMapAudioProcessor::createParameterLayout()

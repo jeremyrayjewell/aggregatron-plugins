@@ -12,7 +12,7 @@ Both targets build as `Standalone` apps and `VST3` plugins from the same project
 - `CMakeLists.txt`: shared JUCE/CMake build for both targets
 - `src/`: `AggregaKeys` source
 - `samplemap/`: `AggregaMap` source
-- `bg.png`, `knob.png`, `slider.png`, `font.ttf`: shared bundled assets
+- `assets/`: shared bundled images and font
 
 ## JUCE dependency
 

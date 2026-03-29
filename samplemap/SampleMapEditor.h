@@ -20,10 +20,13 @@ public:
     void resized() override;
 
 private:
+    class PitchMonitorCanvas;
+
     bool keyPressed(const juce::KeyPress& key, juce::Component*) override;
     bool keyStateChanged(bool isKeyDown, juce::Component*) override;
     void timerCallback() override;
     void releaseStaleHeldKeys();
+    void updatePitchMonitor();
 
     AggregaMapAudioProcessor& audioProcessor;
     juce::Image backgroundImage;
@@ -33,12 +36,15 @@ private:
     OutlinedMapLabel hintLabel;
     OutlinedMapLabel versionLabel;
     OutlinedMapLabel statusLabel;
+    OutlinedMapLabel pitchMonitorLabel;
+    juce::Label pitchMonitorStatusLabel;
     juce::Label minSegmentLabel;
     juce::Label maxSegmentLabel;
     juce::TextButton loadButton { "Load Source" };
     juce::ToggleButton levelMatchToggle { "Match Levels" };
     juce::Slider minSegmentSlider;
     juce::Slider maxSegmentSlider;
+    std::unique_ptr<PitchMonitorCanvas> pitchMonitorCanvas;
     juce::MidiKeyboardComponent keyboardComponent { audioProcessor.getKeyboardState(), juce::MidiKeyboardComponent::horizontalKeyboard };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> levelMatchAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> minSegmentAttachment;
