@@ -1,7 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
-
+#include <vector>
 class AggregatronKeysAudioProcessor : public juce::AudioProcessor
 {
 public:
@@ -41,21 +41,36 @@ public:
     void setUiModWheel(float normalizedValue) noexcept;
     int getUiPitchWheel() const noexcept { return uiPitchWheelValue.load(); }
     float getUiModWheelNormalized() const noexcept { return static_cast<float>(uiModWheelValue.load()) / 127.0f; }
-    juce::String getVersionString() const { return "v0.2"; }
+    juce::String getVersionString() const { return "v0.3"; }
     bool savePresetToFile(const juce::File& file);
     bool loadPresetFromFile(const juce::File& file);
+    bool getWaveformSnapshot(std::vector<float>& dest) const;
+    void queueComputerKeyboardMessage(const juce::MidiMessage& message);
 
 private:
+    struct QueuedComputerKeyboardMessage
+    {
+        juce::MidiMessage message;
+        double timestampMs = 0.0;
+    };
+
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     void syncVoiceCount();
     void updateEffectParameters();
+    void captureWaveformSnapshot(const juce::AudioBuffer<float>& buffer);
 
-    juce::Synthesiser synth;
+    std::unique_ptr<juce::Synthesiser> synth;
     juce::MidiKeyboardState keyboardState;
     juce::Reverb reverb;
     juce::AudioBuffer<float> synthBuffer;
+    juce::AudioBuffer<float> wetBuffer;
+    juce::SmoothedValue<float> gainSmoothed;
+    juce::SmoothedValue<float> reverbMixSmoothed;
+    juce::CriticalSection computerKeyboardMidiLock;
+    std::vector<QueuedComputerKeyboardMessage> computerKeyboardMidi;
+    mutable juce::CriticalSection waveformLock;
+    std::vector<float> recentWaveform;
     double currentSampleRate = 44100.0;
-    int currentVoiceCount = 0;
     std::atomic<int> uiPitchWheelValue { 8192 };
     std::atomic<int> lastPitchWheelValue { 8192 };
     std::atomic<int> uiModWheelValue { 0 };
