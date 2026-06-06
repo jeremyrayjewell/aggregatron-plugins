@@ -1,8 +1,51 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#if JUCE_WINDOWS
+#include <windows.h>
+#include <cstdio>
+#include <string>
+
+// Static initializer to write a simple marker file into %TEMP% so we can
+// detect that the standalone executable we built actually ran. This uses the
+// Win32 API and stdio to avoid depending on JUCE initialization order.
+namespace {
+struct __StartupTempMarker {
+    __StartupTempMarker()
+    {
+        char tempPath[MAX_PATH] = {0};
+        if (GetTempPathA(MAX_PATH, tempPath) > 0)
+        {
+            std::string p(tempPath);
+            p += "AggregaKeys_startup_marker.txt";
+            FILE* f = nullptr;
+            errno_t err = fopen_s(&f, p.c_str(), "w");
+            if (err == 0 && f != nullptr)
+            {
+                fputs("AggregaKeys startup\n", f);
+                fclose(f);
+            }
+        }
+    }
+};
+static __StartupTempMarker __startupTempMarkerInstance;
+} // namespace
+#endif
+
 namespace
 {
+#if JUCE_WINDOWS
+constexpr std::array<int, 17> computerKeyboardVirtualKeys { 'A', 'W', 'S', 'E', 'D', 'F', 'T', 'G', 'Y', 'H', 'U', 'J', 'K', 'O', 'L', 'P', VK_OEM_1 };
+
+bool isComputerKeyboardKeyDown(size_t keyIndex)
+{
+    if (keyIndex >= computerKeyboardVirtualKeys.size())
+        return false;
+
+    return (::GetAsyncKeyState(computerKeyboardVirtualKeys[keyIndex]) & 0x8000) != 0;
+}
+#endif
+
 double noteNumberToFrequency(double noteNumber)
 {
     return 440.0 * std::pow(2.0, (noteNumber - 69.0) / 12.0);
@@ -99,6 +142,27 @@ public:
         return dynamic_cast<SynthSound*>(sound) != nullptr;
     }
 
+    void setCurrentPlaybackSampleRate(double newRate) override
+    {
+        juce::SynthesiserVoice::setCurrentPlaybackSampleRate(newRate);
+
+        if (newRate <= 0.0)
+            return;
+
+        ampEnvelope.setSampleRate(newRate);
+        filterEnvelope.setSampleRate(newRate);
+        ampEnvelope.reset();
+        filterEnvelope.reset();
+
+        juce::dsp::ProcessSpec spec;
+        spec.sampleRate = newRate;
+        spec.maximumBlockSize = 2048;
+        spec.numChannels = 1;
+        filter.prepare(spec);
+        filter.reset();
+        lastPreparedSampleRate = 0.0;
+    }
+
     void setLegatoMode(bool shouldUseLegato) noexcept
     {
         pendingLegato = shouldUseLegato;
@@ -125,6 +189,7 @@ public:
         filter.reset();
         ampEnvelope.noteOn();
         filterEnvelope.noteOn();
+        DBG("[SYNTH] startNote note=" << midiNoteNumber << " vel=" << velocity << " voiceNote=" << currentMidiNote);
     }
 
     void stopNote(float, bool allowTailOff) override
@@ -132,6 +197,7 @@ public:
         ampEnvelope.noteOff();
         filterEnvelope.noteOff();
 
+        DBG("[SYNTH] stopNote note=" << currentMidiNote << " allowTailOff=" << (allowTailOff ? 1 : 0));
         if (! allowTailOff || ! ampEnvelope.isActive())
             clearCurrentNote();
     }
@@ -372,7 +438,10 @@ public:
     void noteOn(int midiChannel, int midiNoteNumber, float velocity) override
     {
         if (! monoMode)
-            return juce::Synthesiser::noteOn(midiChannel, midiNoteNumber, velocity);
+        {
+            DBG("[SYNTH] AggregaKeysSynth::noteOn ch=" << midiChannel << " note=" << midiNoteNumber << " vel=" << velocity);
+            return startPolyNote(midiChannel, midiNoteNumber, velocity);
+        }
 
         updateHeldNote(midiChannel, midiNoteNumber, velocity);
 
@@ -390,7 +459,10 @@ public:
     void noteOff(int midiChannel, int midiNoteNumber, float velocity, bool allowTailOff) override
     {
         if (! monoMode)
+        {
+            DBG("[SYNTH] AggregaKeysSynth::noteOff ch=" << midiChannel << " note=" << midiNoteNumber << " allowTailOff=" << (allowTailOff?1:0));
             return juce::Synthesiser::noteOff(midiChannel, midiNoteNumber, velocity, allowTailOff);
+        }
 
         removeHeldNote(midiChannel, midiNoteNumber);
 
@@ -472,6 +544,30 @@ private:
         float velocity = 1.0f;
     };
 
+    void startPolyNote(int midiChannel, int midiNoteNumber, float velocity)
+    {
+        const juce::ScopedLock lockScope(lock);
+
+        for (auto* sound : sounds)
+        {
+            if (! (sound->appliesToNote(midiNoteNumber) && sound->appliesToChannel(midiChannel)))
+                continue;
+
+            for (auto* voice : voices)
+            {
+                if (voice->getCurrentlyPlayingNote() == midiNoteNumber && voice->isPlayingChannel(midiChannel))
+                    stopVoice(voice, 1.0f, true);
+            }
+
+            auto* voice = findFreeVoice(sound, midiChannel, midiNoteNumber, isNoteStealingEnabled());
+            DBG("[SYNTH] startPolyNote selectedVoice=" << (voice == nullptr ? -1 : voices.indexOf(voice))
+                << " note=" << midiNoteNumber
+                << " maxVoices=" << maximumPlayableVoices);
+
+            startVoice(voice, sound, midiChannel, midiNoteNumber, velocity);
+        }
+    }
+
     void stopExtraVoices()
     {
         for (int i = 1; i < voices.size(); ++i)
@@ -535,12 +631,17 @@ AggregatronKeysAudioProcessor::AggregatronKeysAudioProcessor()
     : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       parameters(*this, nullptr, "PARAMETERS", createParameterLayout())
 {
+    deferredNoteOffSamples.fill(-1);
     synth = std::make_unique<AggregaKeysSynth>();
     syncVoiceCount();
     synth->addSound(new SynthSound());
 
     for (int i = 0; i < 16; ++i)
         synth->addVoice(new SynthVoice(parameters));
+
+    // Ensure there's an immediate startup marker in the debug log so the
+    // external log file is created as soon as the processor is constructed.
+    appendDebugLog("[LOG] AggregatronKeysAudioProcessor constructed");
 }
 
 void AggregatronKeysAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
@@ -581,29 +682,20 @@ void AggregatronKeysAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
 
     keyboardState.processNextMidiBuffer(midiMessages, 0, buffer.getNumSamples(), true);
 
-    std::vector<QueuedComputerKeyboardMessage> queuedComputerKeyboardMidi;
-    {
-        const juce::ScopedLock lock(computerKeyboardMidiLock);
-        queuedComputerKeyboardMidi.swap(computerKeyboardMidi);
-    }
-
-    if (! queuedComputerKeyboardMidi.empty())
-    {
-        const auto maxSamplePosition = juce::jmax(0, buffer.getNumSamples() - 1);
-        const auto eventCount = static_cast<int>(queuedComputerKeyboardMidi.size());
-
-        for (int index = 0; index < eventCount; ++index)
-        {
-            const auto samplePosition = eventCount == 1
-                                      ? 0
-                                      : juce::jlimit(0, maxSamplePosition, juce::roundToInt(static_cast<double>(index) * static_cast<double>(maxSamplePosition) / static_cast<double>(eventCount - 1)));
-            midiMessages.addEvent(queuedComputerKeyboardMidi[static_cast<size_t>(index)].message, samplePosition);
-        }
-    }
-
     for (const auto metadata : midiMessages)
     {
         const auto message = metadata.getMessage();
+
+        if (message.isNoteOn())
+        {
+            const juce::String s = "[MIDI] processBlock noteOn ch=" + juce::String(message.getChannel()) + " note=" + juce::String(message.getNoteNumber()) + " vel=" + juce::String((int)message.getVelocity()) + " sample=" + juce::String(metadata.samplePosition);
+            DBG(s);
+        }
+        else if (message.isNoteOff())
+        {
+            const juce::String s = "[MIDI] processBlock noteOff ch=" + juce::String(message.getChannel()) + " note=" + juce::String(message.getNoteNumber()) + " sample=" + juce::String(metadata.samplePosition);
+            DBG(s);
+        }
 
         if (message.isPitchWheel())
         {
@@ -630,6 +722,8 @@ void AggregatronKeysAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
         midiMessages.addEvent(juce::MidiMessage::controllerEvent(1, 1, modWheel), 0);
         lastModWheelValue.store(modWheel);
     }
+
+    enforceMinimumMidiNoteDurations(midiMessages, buffer.getNumSamples());
 
     synthBuffer.setSize(buffer.getNumChannels(), buffer.getNumSamples(), false, false, true);
     wetBuffer.setSize(buffer.getNumChannels(), buffer.getNumSamples(), false, false, true);
@@ -669,10 +763,41 @@ void AggregatronKeysAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
 
 }
 
-void AggregatronKeysAudioProcessor::queueComputerKeyboardMessage(const juce::MidiMessage& message)
+void AggregatronKeysAudioProcessor::appendDebugLog(const juce::String& s) noexcept
 {
-    const juce::ScopedLock lock(computerKeyboardMidiLock);
-    computerKeyboardMidi.push_back({ message, juce::Time::getMillisecondCounterHiRes() });
+    const juce::ScopedLock lock(debugLogLock);
+    debugLog.push_back(s);
+
+    // Also append immediately to a file in Documents so logs are available even if editor isn't running
+    juce::File docLog = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("AggregaKeys_qwerty_log.txt");
+    juce::FileOutputStream outDoc(docLog);
+    if (outDoc.openedOk())
+    {
+        outDoc.setPosition(docLog.getSize());
+        outDoc.writeString(s + "\r\n");
+    }
+
+    // Also write to a log file next to the executable as a fallback (ensures visibility)
+    juce::File exeLog;
+    if (auto exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile); exe.exists())
+        exeLog = exe.getParentDirectory().getChildFile("AggregaKeys_qwerty_log.txt");
+    else
+        exeLog = juce::File::getCurrentWorkingDirectory().getChildFile("AggregaKeys_qwerty_log.txt");
+
+    juce::FileOutputStream outExe(exeLog);
+    if (outExe.openedOk())
+    {
+        outExe.setPosition(exeLog.getSize());
+        outExe.writeString(s + "\r\n");
+    }
+}
+
+std::vector<juce::String> AggregatronKeysAudioProcessor::drainDebugLog() noexcept
+{
+    const juce::ScopedLock lock(debugLogLock);
+    std::vector<juce::String> copy;
+    copy.swap(debugLog);
+    return copy;
 }
 
 juce::AudioProcessorEditor* AggregatronKeysAudioProcessor::createEditor()
@@ -752,6 +877,78 @@ void AggregatronKeysAudioProcessor::setStateInformation(const void* data, int si
 void AggregatronKeysAudioProcessor::setUiPitchWheel(int value) noexcept
 {
     uiPitchWheelValue.store(juce::jlimit(0, 16383, value));
+}
+
+void AggregatronKeysAudioProcessor::enforceMinimumMidiNoteDurations(juce::MidiBuffer& midiMessages, int numSamples)
+{
+    if (numSamples <= 0)
+        return;
+
+    constexpr int minimumNoteSamples = 96;
+    const auto maxSamplePosition = juce::jmax(0, numSamples - 1);
+    std::array<int, 16 * 128> noteOnSamples;
+    noteOnSamples.fill(-1);
+
+    auto noteIndex = [](int midiChannel, int midiNoteNumber)
+    {
+        return (juce::jlimit(1, 16, midiChannel) - 1) * 128 + juce::jlimit(0, 127, midiNoteNumber);
+    };
+
+    juce::MidiBuffer adjustedMessages;
+
+    for (size_t index = 0; index < deferredNoteOffSamples.size(); ++index)
+    {
+        const auto deferredSample = deferredNoteOffSamples[index];
+        if (deferredSample < 0)
+            continue;
+
+        const auto midiChannel = static_cast<int>(index / 128) + 1;
+        const auto midiNoteNumber = static_cast<int>(index % 128);
+        const auto samplePosition = juce::jlimit(0, maxSamplePosition, deferredSample);
+        adjustedMessages.addEvent(juce::MidiMessage::noteOff(midiChannel, midiNoteNumber, 0.0f), samplePosition);
+        deferredNoteOffSamples[index] = -1;
+    }
+
+    for (const auto metadata : midiMessages)
+    {
+        const auto message = metadata.getMessage();
+        auto samplePosition = juce::jlimit(0, maxSamplePosition, metadata.samplePosition);
+
+        if (message.isNoteOn())
+        {
+            noteOnSamples[static_cast<size_t>(noteIndex(message.getChannel(), message.getNoteNumber()))] = samplePosition;
+            adjustedMessages.addEvent(message, samplePosition);
+            continue;
+        }
+
+        if (message.isNoteOff())
+        {
+            const auto index = static_cast<size_t>(noteIndex(message.getChannel(), message.getNoteNumber()));
+            const auto noteOnSample = noteOnSamples[index];
+
+            if (noteOnSample >= 0 && samplePosition - noteOnSample < minimumNoteSamples)
+            {
+                const auto desiredSample = noteOnSample + minimumNoteSamples;
+
+                if (desiredSample <= maxSamplePosition)
+                {
+                    samplePosition = desiredSample;
+                }
+                else
+                {
+                    deferredNoteOffSamples[index] = desiredSample - maxSamplePosition;
+                    noteOnSamples[index] = -1;
+                    continue;
+                }
+            }
+
+            noteOnSamples[index] = -1;
+        }
+
+        adjustedMessages.addEvent(message, samplePosition);
+    }
+
+    midiMessages.swapWith(adjustedMessages);
 }
 
 void AggregatronKeysAudioProcessor::setUiModWheel(float normalizedValue) noexcept

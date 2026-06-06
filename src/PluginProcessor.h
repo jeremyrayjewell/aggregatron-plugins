@@ -37,6 +37,8 @@ public:
 
     juce::AudioProcessorValueTreeState parameters;
     juce::MidiKeyboardState& getKeyboardState() noexcept { return keyboardState; }
+    void appendDebugLog(const juce::String& s) noexcept;
+    std::vector<juce::String> drainDebugLog() noexcept;
     void setUiPitchWheel(int value) noexcept;
     void setUiModWheel(float normalizedValue) noexcept;
     int getUiPitchWheel() const noexcept { return uiPitchWheelValue.load(); }
@@ -45,16 +47,10 @@ public:
     bool savePresetToFile(const juce::File& file);
     bool loadPresetFromFile(const juce::File& file);
     bool getWaveformSnapshot(std::vector<float>& dest) const;
-    void queueComputerKeyboardMessage(const juce::MidiMessage& message);
 
 private:
-    struct QueuedComputerKeyboardMessage
-    {
-        juce::MidiMessage message;
-        double timestampMs = 0.0;
-    };
-
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    void enforceMinimumMidiNoteDurations(juce::MidiBuffer& midiMessages, int numSamples);
     void syncVoiceCount();
     void updateEffectParameters();
     void captureWaveformSnapshot(const juce::AudioBuffer<float>& buffer);
@@ -66,8 +62,6 @@ private:
     juce::AudioBuffer<float> wetBuffer;
     juce::SmoothedValue<float> gainSmoothed;
     juce::SmoothedValue<float> reverbMixSmoothed;
-    juce::CriticalSection computerKeyboardMidiLock;
-    std::vector<QueuedComputerKeyboardMessage> computerKeyboardMidi;
     mutable juce::CriticalSection waveformLock;
     std::vector<float> recentWaveform;
     double currentSampleRate = 44100.0;
@@ -75,6 +69,10 @@ private:
     std::atomic<int> lastPitchWheelValue { 8192 };
     std::atomic<int> uiModWheelValue { 0 };
     std::atomic<int> lastModWheelValue { 0 };
+    std::array<int, 16 * 128> deferredNoteOffSamples {};
+
+    juce::CriticalSection debugLogLock;
+    std::vector<juce::String> debugLog;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AggregatronKeysAudioProcessor)
 };

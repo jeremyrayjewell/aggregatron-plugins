@@ -1,27 +1,18 @@
 #include "PluginEditor.h"
 
-#if JUCE_WINDOWS
- #include <windows.h>
-#endif
-
 namespace
 {
 constexpr std::array<char, 17> computerKeyboardCharacters { 'a', 'w', 's', 'e', 'd', 'f', 't', 'g', 'y', 'h', 'u', 'j', 'k', 'o', 'l', 'p', ';' };
 
-#if JUCE_WINDOWS
-constexpr std::array<int, 17> computerKeyboardVirtualKeys { 'A', 'W', 'S', 'E', 'D', 'F', 'T', 'G', 'Y', 'H', 'U', 'J', 'K', 'O', 'L', 'P', VK_OEM_1 };
-#endif
-
-bool isComputerKeyboardKeyDown(size_t keyIndex)
+int keyPressToComputerKeyboardNote(const juce::KeyPress& key) noexcept
 {
-    if (keyIndex >= computerKeyboardCharacters.size())
-        return false;
+    const auto character = juce::CharacterFunctions::toLowerCase(key.getTextCharacter());
 
-   #if JUCE_WINDOWS
-    return (::GetAsyncKeyState(computerKeyboardVirtualKeys[keyIndex]) & 0x8000) != 0;
-   #else
-    return juce::KeyPress::isKeyCurrentlyDown(static_cast<int>(computerKeyboardCharacters[keyIndex]));
-   #endif
+    for (size_t index = 0; index < computerKeyboardCharacters.size(); ++index)
+        if (character == static_cast<juce::juce_wchar>(computerKeyboardCharacters[index]))
+            return 48 + static_cast<int>(index);
+
+    return -1;
 }
 
 int countWhiteKeysInRange(int startNote, int endNote)
@@ -304,6 +295,7 @@ AggregatronKeysAudioProcessorEditor::AggregatronKeysAudioProcessorEditor(Aggrega
     setWantsKeyboardFocus(true);
     setMouseClickGrabsKeyboardFocus(true);
     setFocusContainerType(juce::Component::FocusContainerType::keyboardFocusContainer);
+    addKeyListener(this);
 
     titleLabel.setText("AggregaKeys", juce::dontSendNotification);
     titleLabel.setJustificationType(juce::Justification::centredLeft);
@@ -457,16 +449,18 @@ AggregatronKeysAudioProcessorEditor::AggregatronKeysAudioProcessorEditor(Aggrega
     keyboardComponent.setLowestVisibleKey(36);
     keyboardComponent.setKeyPressBaseOctave(4);
     keyboardComponent.clearKeyMappings();
-    keyboardComponent.setWantsKeyboardFocus(true);
-    keyboardComponent.setMouseClickGrabsKeyboardFocus(true);
+    keyboardComponent.setWantsKeyboardFocus(false);
+    keyboardComponent.setMouseClickGrabsKeyboardFocus(false);
     addAndMakeVisible(keyboardComponent);
 
-    keyboardComponent.grabKeyboardFocus();
+    grabKeyboardFocus();
     startTimerHz(120);
 }
 
 AggregatronKeysAudioProcessorEditor::~AggregatronKeysAudioProcessorEditor()
 {
+    keyboardComponent.removeKeyListener(this);
+    removeKeyListener(this);
     releaseComputerKeyboardNotes();
     savePresetButton.setLookAndFeel(nullptr);
     loadPresetButton.setLookAndFeel(nullptr);
@@ -588,7 +582,7 @@ void AggregatronKeysAudioProcessorEditor::setParameterValue(const juce::String& 
 void AggregatronKeysAudioProcessorEditor::mouseDown(const juce::MouseEvent& event)
 {
     AudioProcessorEditor::mouseDown(event);
-    keyboardComponent.grabKeyboardFocus();
+    grabKeyboardFocus();
 }
 
 void AggregatronKeysAudioProcessorEditor::disableKeyboardFocus(juce::Component& component)
@@ -603,6 +597,31 @@ void AggregatronKeysAudioProcessorEditor::focusLost(FocusChangeType cause)
     AudioProcessorEditor::focusLost(cause);
 }
 
+bool AggregatronKeysAudioProcessorEditor::keyPressed(const juce::KeyPress& key, juce::Component* originatingComponent)
+{
+    juce::ignoreUnused(originatingComponent);
+
+    const auto noteNumber = keyPressToComputerKeyboardNote(key);
+    if (noteNumber < 0)
+        return false;
+
+    const auto keyCode = key.getKeyCode();
+    if (heldComputerKeys.find(keyCode) != heldComputerKeys.end())
+        return true;
+
+    heldComputerKeys[keyCode] = noteNumber;
+    audioProcessor.appendDebugLog("[QWERTY] editor keyDown keyCode=" + juce::String(keyCode) + " note=" + juce::String(noteNumber));
+    audioProcessor.getKeyboardState().noteOn(1, noteNumber, 0.9f);
+    return true;
+}
+
+bool AggregatronKeysAudioProcessorEditor::keyStateChanged(bool isKeyDown, juce::Component* originatingComponent)
+{
+    juce::ignoreUnused(isKeyDown, originatingComponent);
+    releaseStaleHeldKeys();
+    return false;
+}
+
 void AggregatronKeysAudioProcessorEditor::syncComputerKeyboardState()
 {
     if (! isShowing() || ! juce::Process::isForegroundProcess())
@@ -610,34 +629,35 @@ void AggregatronKeysAudioProcessorEditor::syncComputerKeyboardState()
         releaseComputerKeyboardNotes();
         return;
     }
-
-    for (size_t index = 0; index < computerKeyboardCharacters.size(); ++index)
-        setComputerKeyboardNoteState(index, isComputerKeyboardKeyDown(index));
 }
 
-void AggregatronKeysAudioProcessorEditor::setComputerKeyboardNoteState(size_t keyIndex, bool isDown)
+void AggregatronKeysAudioProcessorEditor::releaseStaleHeldKeys()
 {
-    if (keyIndex >= computerKeyStates.size() || computerKeyStates[keyIndex] == isDown)
-        return;
+    std::vector<int> releasedKeys;
+    releasedKeys.reserve(heldComputerKeys.size());
 
-    computerKeyStates[keyIndex] = isDown;
-    const auto noteNumber = 48 + static_cast<int>(keyIndex);
-    audioProcessor.queueComputerKeyboardMessage(isDown ? juce::MidiMessage::noteOn(1, noteNumber, 0.9f)
-                                                       : juce::MidiMessage::noteOff(1, noteNumber));
+    for (const auto& entry : heldComputerKeys)
+        if (! juce::KeyPress::isKeyCurrentlyDown(entry.first))
+            releasedKeys.push_back(entry.first);
+
+    for (const auto keyCode : releasedKeys)
+    {
+        const auto noteNumber = heldComputerKeys[keyCode];
+        audioProcessor.appendDebugLog("[QWERTY] editor keyUp keyCode=" + juce::String(keyCode) + " note=" + juce::String(noteNumber));
+        audioProcessor.getKeyboardState().noteOff(1, noteNumber, 0.0f);
+        heldComputerKeys.erase(keyCode);
+    }
 }
 
 void AggregatronKeysAudioProcessorEditor::releaseComputerKeyboardNotes()
 {
-    for (size_t index = 0; index < computerKeyStates.size(); ++index)
+    for (const auto& entry : heldComputerKeys)
     {
-        if (! computerKeyStates[index])
-            continue;
-
-        computerKeyStates[index] = false;
-        const auto noteNumber = 48 + static_cast<int>(index);
-        const auto message = juce::MidiMessage::noteOff(1, noteNumber);
-        audioProcessor.queueComputerKeyboardMessage(message);
+        audioProcessor.appendDebugLog("[QWERTY] editor release keyCode=" + juce::String(entry.first) + " note=" + juce::String(entry.second));
+        audioProcessor.getKeyboardState().noteOff(1, entry.second, 0.0f);
     }
+
+    heldComputerKeys.clear();
 }
 
 void AggregatronKeysAudioProcessorEditor::applyFactoryPreset(const juce::String& presetName)
@@ -766,10 +786,8 @@ void AggregatronKeysAudioProcessorEditor::applyFactoryPreset(const juce::String&
 
 void AggregatronKeysAudioProcessorEditor::timerCallback()
 {
-    if (! keyboardComponent.hasKeyboardFocus(true))
-        keyboardComponent.grabKeyboardFocus();
-
     syncComputerKeyboardState();
+    releaseStaleHeldKeys();
 
     if (! pitchWheelSlider.isMouseButtonDown())
         pitchWheelSlider.setValue(static_cast<double>(audioProcessor.getUiPitchWheel()), juce::dontSendNotification);
@@ -780,6 +798,24 @@ void AggregatronKeysAudioProcessorEditor::timerCallback()
     std::vector<float> waveform;
     if (audioProcessor.getWaveformSnapshot(waveform))
         waveformDisplay->setWaveform(waveform);
+
+    // Drain debug log from processor and append to a file for external inspection
+    {
+        auto logs = audioProcessor.drainDebugLog();
+        if (! logs.empty())
+        {
+            const auto logFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("AggregaKeys_qwerty_log.txt");
+            juce::FileOutputStream out(logFile);
+            if (out.openedOk())
+            {
+                out.setPosition(logFile.getSize());
+                for (auto& line : logs)
+                {
+                    out.writeString(line + "\r\n");
+                }
+            }
+        }
+    }
 }
 
 void AggregatronKeysAudioProcessorEditor::paint(juce::Graphics& g)
@@ -932,6 +968,3 @@ void AggregatronKeysAudioProcessorEditor::resized()
     keyboardComponent.setColour(juce::MidiKeyboardComponent::keyDownOverlayColourId, juce::Colours::deepskyblue.withAlpha(0.42f));
     keyboardComponent.setBounds(keyboardArea);
 }
-
-
-

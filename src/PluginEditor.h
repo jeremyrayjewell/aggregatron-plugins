@@ -2,6 +2,7 @@
 
 #include "PluginProcessor.h"
 #include <array>
+#include <map>
 class OutlinedLabel : public juce::Label
 {
 public:
@@ -9,7 +10,8 @@ public:
 };
 
 class AggregatronKeysAudioProcessorEditor : public juce::AudioProcessorEditor,
-                                            private juce::Timer
+                                            private juce::Timer,
+                                            private juce::KeyListener
 {
 public:
     explicit AggregatronKeysAudioProcessorEditor(AggregatronKeysAudioProcessor&);
@@ -19,6 +21,8 @@ public:
     void resized() override;
     void mouseDown(const juce::MouseEvent& event) override;
     void focusLost(FocusChangeType cause) override;
+    bool keyPressed(const juce::KeyPress& key, juce::Component* originatingComponent) override;
+    bool keyStateChanged(bool isKeyDown, juce::Component* originatingComponent) override;
 
 private:
     class ImageKnobLookAndFeel;
@@ -53,7 +57,7 @@ private:
     void setParameterValue(const juce::String& parameterId, float value);
     void disableKeyboardFocus(juce::Component& component);
     void syncComputerKeyboardState();
-    void setComputerKeyboardNoteState(size_t keyIndex, bool isDown);
+    void releaseStaleHeldKeys();
     void releaseComputerKeyboardNotes();
     void timerCallback() override;
 
@@ -127,7 +131,7 @@ private:
     juce::Rectangle<int> motionGroupBounds;
     juce::Rectangle<int> performanceGroupBounds;
     juce::Rectangle<int> fxGroupBounds;
-    std::array<bool, 17> computerKeyStates {};
+    std::map<int, int> heldComputerKeys;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AggregatronKeysAudioProcessorEditor)
 };
