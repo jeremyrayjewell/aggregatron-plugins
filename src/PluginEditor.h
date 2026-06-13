@@ -59,6 +59,7 @@ private:
     void syncComputerKeyboardState();
     void releaseStaleHeldKeys();
     void releaseComputerKeyboardNotes();
+    void processPendingComputerKeyboardNoteOffs();
     void timerCallback() override;
 
     AggregatronKeysAudioProcessor& audioProcessor;
@@ -132,6 +133,9 @@ private:
     juce::Rectangle<int> performanceGroupBounds;
     juce::Rectangle<int> fxGroupBounds;
     std::map<int, int> heldComputerKeys;
+    std::map<int, uint32_t> heldComputerKeyPressTimesMs;
+    std::map<int, int> pendingComputerKeyNoteOffs;
+    std::map<int, uint32_t> pendingComputerKeyNoteOffDueTimesMs;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AggregatronKeysAudioProcessorEditor)
 };

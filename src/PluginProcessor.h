@@ -1,7 +1,6 @@
 #pragma once
 
 #include <JuceHeader.h>
-#include <vector>
 class AggregatronKeysAudioProcessor : public juce::AudioProcessor
 {
 public:
@@ -37,8 +36,6 @@ public:
 
     juce::AudioProcessorValueTreeState parameters;
     juce::MidiKeyboardState& getKeyboardState() noexcept { return keyboardState; }
-    void appendDebugLog(const juce::String& s) noexcept;
-    std::vector<juce::String> drainDebugLog() noexcept;
     void setUiPitchWheel(int value) noexcept;
     void setUiModWheel(float normalizedValue) noexcept;
     int getUiPitchWheel() const noexcept { return uiPitchWheelValue.load(); }
@@ -50,7 +47,6 @@ public:
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
-    void enforceMinimumMidiNoteDurations(juce::MidiBuffer& midiMessages, int numSamples);
     void syncVoiceCount();
     void updateEffectParameters();
     void captureWaveformSnapshot(const juce::AudioBuffer<float>& buffer);
@@ -69,10 +65,6 @@ private:
     std::atomic<int> lastPitchWheelValue { 8192 };
     std::atomic<int> uiModWheelValue { 0 };
     std::atomic<int> lastModWheelValue { 0 };
-    std::array<int, 16 * 128> deferredNoteOffSamples {};
-
-    juce::CriticalSection debugLogLock;
-    std::vector<juce::String> debugLog;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AggregatronKeysAudioProcessor)
 };

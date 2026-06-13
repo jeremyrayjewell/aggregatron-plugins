@@ -1,8 +1,22 @@
 #include "PluginEditor.h"
 
+#if JUCE_WINDOWS
+ #include <windows.h>
+#endif
+
 namespace
 {
 constexpr std::array<char, 17> computerKeyboardCharacters { 'a', 'w', 's', 'e', 'd', 'f', 't', 'g', 'y', 'h', 'u', 'j', 'k', 'o', 'l', 'p', ';' };
+constexpr uint32_t minimumQwertyNoteDurationMs = 24;
+
+bool isPhysicalComputerKeyboardKeyDown(int keyCode)
+{
+   #if JUCE_WINDOWS
+    return (::GetAsyncKeyState(keyCode) & 0x8000) != 0;
+   #else
+    return juce::KeyPress::isKeyCurrentlyDown(keyCode);
+   #endif
+}
 
 int keyPressToComputerKeyboardNote(const juce::KeyPress& key) noexcept
 {
@@ -418,6 +432,7 @@ AggregatronKeysAudioProcessorEditor::AggregatronKeysAudioProcessorEditor(Aggrega
     configureSlider(reverbDampingControl, "reverbDamping", "Rev Damp");
 
     styleModeButton(monoModeButton);
+    monoModeButton.setButtonText("Mono");
     monoModeButton.setClickingTogglesState(true);
     monoModeButton.setTooltip("Play monophonically with legato glide");
     disableKeyboardFocus(monoModeButton);
@@ -601,16 +616,35 @@ bool AggregatronKeysAudioProcessorEditor::keyPressed(const juce::KeyPress& key, 
 {
     juce::ignoreUnused(originatingComponent);
 
+    const auto keyCode = key.getKeyCode();
+    const auto alreadyHeld = heldComputerKeys.find(keyCode) != heldComputerKeys.end();
     const auto noteNumber = keyPressToComputerKeyboardNote(key);
+
+    if (keyCode == juce::KeyPress::escapeKey)
+    {
+        heldComputerKeys.clear();
+        heldComputerKeyPressTimesMs.clear();
+        pendingComputerKeyNoteOffs.clear();
+        pendingComputerKeyNoteOffDueTimesMs.clear();
+        audioProcessor.getKeyboardState().allNotesOff(1);
+        return true;
+    }
+
     if (noteNumber < 0)
         return false;
 
-    const auto keyCode = key.getKeyCode();
-    if (heldComputerKeys.find(keyCode) != heldComputerKeys.end())
+    if (alreadyHeld)
         return true;
 
+    if (const auto pendingNote = pendingComputerKeyNoteOffs.find(keyCode); pendingNote != pendingComputerKeyNoteOffs.end())
+    {
+        audioProcessor.getKeyboardState().noteOff(1, pendingNote->second, 0.0f);
+        pendingComputerKeyNoteOffs.erase(keyCode);
+        pendingComputerKeyNoteOffDueTimesMs.erase(keyCode);
+    }
+
     heldComputerKeys[keyCode] = noteNumber;
-    audioProcessor.appendDebugLog("[QWERTY] editor keyDown keyCode=" + juce::String(keyCode) + " note=" + juce::String(noteNumber));
+    heldComputerKeyPressTimesMs[keyCode] = juce::Time::getMillisecondCounter();
     audioProcessor.getKeyboardState().noteOn(1, noteNumber, 0.9f);
     return true;
 }
@@ -618,46 +652,90 @@ bool AggregatronKeysAudioProcessorEditor::keyPressed(const juce::KeyPress& key, 
 bool AggregatronKeysAudioProcessorEditor::keyStateChanged(bool isKeyDown, juce::Component* originatingComponent)
 {
     juce::ignoreUnused(isKeyDown, originatingComponent);
-    releaseStaleHeldKeys();
     return false;
 }
 
 void AggregatronKeysAudioProcessorEditor::syncComputerKeyboardState()
 {
-    if (! isShowing() || ! juce::Process::isForegroundProcess())
-    {
-        releaseComputerKeyboardNotes();
-        return;
-    }
 }
 
 void AggregatronKeysAudioProcessorEditor::releaseStaleHeldKeys()
 {
+    if (heldComputerKeys.empty())
+        return;
+
     std::vector<int> releasedKeys;
     releasedKeys.reserve(heldComputerKeys.size());
 
     for (const auto& entry : heldComputerKeys)
-        if (! juce::KeyPress::isKeyCurrentlyDown(entry.first))
+        if (! isPhysicalComputerKeyboardKeyDown(entry.first))
             releasedKeys.push_back(entry.first);
 
     for (const auto keyCode : releasedKeys)
     {
         const auto noteNumber = heldComputerKeys[keyCode];
-        audioProcessor.appendDebugLog("[QWERTY] editor keyUp keyCode=" + juce::String(keyCode) + " note=" + juce::String(noteNumber));
-        audioProcessor.getKeyboardState().noteOff(1, noteNumber, 0.0f);
+        const auto nowMs = juce::Time::getMillisecondCounter();
+        const auto pressedAt = heldComputerKeyPressTimesMs.count(keyCode) > 0 ? heldComputerKeyPressTimesMs[keyCode] : nowMs;
+        const auto heldDurationMs = nowMs - pressedAt;
+
+        if (heldDurationMs < minimumQwertyNoteDurationMs)
+        {
+            const auto dueTimeMs = pressedAt + minimumQwertyNoteDurationMs;
+            pendingComputerKeyNoteOffs[keyCode] = noteNumber;
+            pendingComputerKeyNoteOffDueTimesMs[keyCode] = dueTimeMs;
+        }
+        else
+        {
+            audioProcessor.getKeyboardState().noteOff(1, noteNumber, 0.0f);
+        }
+
         heldComputerKeys.erase(keyCode);
+        heldComputerKeyPressTimesMs.erase(keyCode);
     }
 }
 
 void AggregatronKeysAudioProcessorEditor::releaseComputerKeyboardNotes()
 {
     for (const auto& entry : heldComputerKeys)
-    {
-        audioProcessor.appendDebugLog("[QWERTY] editor release keyCode=" + juce::String(entry.first) + " note=" + juce::String(entry.second));
         audioProcessor.getKeyboardState().noteOff(1, entry.second, 0.0f);
-    }
+
+    for (const auto& entry : pendingComputerKeyNoteOffs)
+        audioProcessor.getKeyboardState().noteOff(1, entry.second, 0.0f);
 
     heldComputerKeys.clear();
+    heldComputerKeyPressTimesMs.clear();
+    pendingComputerKeyNoteOffs.clear();
+    pendingComputerKeyNoteOffDueTimesMs.clear();
+}
+
+void AggregatronKeysAudioProcessorEditor::processPendingComputerKeyboardNoteOffs()
+{
+    if (pendingComputerKeyNoteOffs.empty())
+        return;
+
+    const auto nowMs = juce::Time::getMillisecondCounter();
+    std::vector<int> completedKeyCodes;
+    completedKeyCodes.reserve(pendingComputerKeyNoteOffs.size());
+
+    for (const auto& entry : pendingComputerKeyNoteOffs)
+    {
+        const auto keyCode = entry.first;
+        const auto dueTimeIt = pendingComputerKeyNoteOffDueTimesMs.find(keyCode);
+        if (dueTimeIt == pendingComputerKeyNoteOffDueTimesMs.end())
+            continue;
+
+        if (nowMs < dueTimeIt->second)
+            continue;
+
+        audioProcessor.getKeyboardState().noteOff(1, entry.second, 0.0f);
+        completedKeyCodes.push_back(keyCode);
+    }
+
+    for (const auto keyCode : completedKeyCodes)
+    {
+        pendingComputerKeyNoteOffs.erase(keyCode);
+        pendingComputerKeyNoteOffDueTimesMs.erase(keyCode);
+    }
 }
 
 void AggregatronKeysAudioProcessorEditor::applyFactoryPreset(const juce::String& presetName)
@@ -788,6 +866,7 @@ void AggregatronKeysAudioProcessorEditor::timerCallback()
 {
     syncComputerKeyboardState();
     releaseStaleHeldKeys();
+    processPendingComputerKeyboardNoteOffs();
 
     if (! pitchWheelSlider.isMouseButtonDown())
         pitchWheelSlider.setValue(static_cast<double>(audioProcessor.getUiPitchWheel()), juce::dontSendNotification);
@@ -798,24 +877,6 @@ void AggregatronKeysAudioProcessorEditor::timerCallback()
     std::vector<float> waveform;
     if (audioProcessor.getWaveformSnapshot(waveform))
         waveformDisplay->setWaveform(waveform);
-
-    // Drain debug log from processor and append to a file for external inspection
-    {
-        auto logs = audioProcessor.drainDebugLog();
-        if (! logs.empty())
-        {
-            const auto logFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("AggregaKeys_qwerty_log.txt");
-            juce::FileOutputStream out(logFile);
-            if (out.openedOk())
-            {
-                out.setPosition(logFile.getSize());
-                for (auto& line : logs)
-                {
-                    out.writeString(line + "\r\n");
-                }
-            }
-        }
-    }
 }
 
 void AggregatronKeysAudioProcessorEditor::paint(juce::Graphics& g)
@@ -934,7 +995,10 @@ void AggregatronKeysAudioProcessorEditor::resized()
     layoutRow(ampGroupBounds.reduced(8, 0), { &gainControl, &velocityAmpControl, &ampAttackControl, &ampDecayControl, &ampSustainControl, &ampReleaseControl });
     layoutRow(filterGroupBounds.reduced(8, 0), { &filterCutoffControl, &filterResonanceControl, &filterEnvAmountControl, &velocityFilterControl, &filterAttackControl, &filterDecayControl, &filterSustainControl, &filterReleaseControl });
     layoutRow(motionGroupBounds.reduced(8, 0), { &lfoRateControl, &lfoPitchDepthControl, &lfoFilterDepthControl });
-    layoutRow(performanceGroupBounds.reduced(8, 0), { &glideControl, &polyphonyControl, &driveControl });
+    auto performanceContent = performanceGroupBounds.reduced(8, 0);
+    auto monoButtonArea = performanceContent.removeFromBottom(32).reduced(4, 2);
+    monoModeButton.setBounds(monoButtonArea.removeFromLeft(110));
+    layoutRow(performanceContent, { &glideControl, &polyphonyControl, &driveControl });
     layoutRow(fxGroupBounds.reduced(8, 0), { &reverbMixControl, &reverbSizeControl, &reverbDampingControl });
 
     area.removeFromTop(8);
