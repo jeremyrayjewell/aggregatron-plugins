@@ -7,7 +7,7 @@
 namespace
 {
 constexpr std::array<char, 17> computerKeyboardCharacters { 'a', 'w', 's', 'e', 'd', 'f', 't', 'g', 'y', 'h', 'u', 'j', 'k', 'o', 'l', 'p', ';' };
-constexpr uint32_t minimumQwertyNoteDurationMs = 24;
+constexpr uint32_t minimumQwertyNoteDurationMs = 8;
 
 bool isPhysicalComputerKeyboardKeyDown(int keyCode)
 {
@@ -58,11 +58,12 @@ void stylePresetButton(juce::TextButton& button)
     button.setColour(juce::TextButton::textColourOnId, juce::Colours::transparentWhite);
 }
 
-void styleModeButton(juce::ToggleButton& button)
+void styleModeButton(juce::TextButton& button)
 {
-    button.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
-    button.setColour(juce::ToggleButton::tickColourId, juce::Colours::deepskyblue.withAlpha(0.85f));
-    button.setColour(juce::ToggleButton::tickDisabledColourId, juce::Colours::white.withAlpha(0.35f));
+    button.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.88f));
+    button.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    button.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+    button.setColour(juce::TextButton::buttonOnColourId, juce::Colours::transparentBlack);
 }
 
 void setupSectionLabel(OutlinedLabel& label, const juce::String& text)
@@ -243,6 +244,61 @@ public:
     }
 };
 
+class AggregatronKeysAudioProcessorEditor::ModeToggleLookAndFeel final : public juce::LookAndFeel_V4
+{
+public:
+    void drawButtonBackground(juce::Graphics& g,
+                              juce::Button& button,
+                              const juce::Colour&,
+                              bool shouldDrawButtonAsHighlighted,
+                              bool shouldDrawButtonAsDown) override
+    {
+        auto bounds = button.getLocalBounds().toFloat().reduced(0.5f);
+        auto baseColour = juce::Colours::black.withAlpha(button.getToggleState() ? 0.26f : 0.14f);
+        auto outlineColour = juce::Colours::white.withAlpha(button.getToggleState() ? 0.20f : 0.10f);
+        auto accentColour = juce::Colours::deepskyblue.withAlpha(button.getToggleState() ? 0.82f : 0.22f);
+
+        if (shouldDrawButtonAsDown)
+            accentColour = accentColour.brighter(0.08f);
+        else if (shouldDrawButtonAsHighlighted)
+            accentColour = accentColour.brighter(0.04f);
+
+        const auto cornerSize = bounds.getHeight() * 0.5f;
+        g.setColour(baseColour);
+        g.fillRoundedRectangle(bounds, cornerSize);
+        g.setColour(outlineColour);
+        g.drawRoundedRectangle(bounds, cornerSize, 1.0f);
+
+        auto trackBounds = bounds.reduced(8.0f, 5.0f);
+        const auto thumbDiameter = trackBounds.getHeight();
+        const auto thumbX = button.getToggleState() ? trackBounds.getRight() - thumbDiameter : trackBounds.getX();
+        auto thumbBounds = juce::Rectangle<float>(thumbDiameter, thumbDiameter).withPosition(thumbX, trackBounds.getY());
+
+        g.setColour(accentColour);
+        g.fillRoundedRectangle(trackBounds, trackBounds.getHeight() * 0.5f);
+        g.setColour(juce::Colours::white.withAlpha(button.getToggleState() ? 0.95f : 0.80f));
+        g.fillEllipse(thumbBounds);
+    }
+
+    juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override
+    {
+        return juce::Font(juce::FontOptions(static_cast<float>(buttonHeight) * 0.48f));
+    }
+
+    void drawButtonText(juce::Graphics& g,
+                        juce::TextButton& button,
+                        bool,
+                        bool) override
+    {
+        auto bounds = button.getLocalBounds().toFloat();
+        auto textArea = bounds.withTrimmedLeft(bounds.getHeight() + 10.0f).reduced(0.0f, 1.0f);
+        g.setColour(button.findColour(button.getToggleState() ? juce::TextButton::textColourOnId
+                                                               : juce::TextButton::textColourOffId));
+        g.setFont(getTextButtonFont(button, button.getHeight()));
+        g.drawFittedText(button.getButtonText(), textArea.toNearestInt(), juce::Justification::centredLeft, 1);
+    }
+};
+
 class AggregatronKeysAudioProcessorEditor::WaveformDisplay final : public juce::Component
 {
 public:
@@ -303,6 +359,7 @@ AggregatronKeysAudioProcessorEditor::AggregatronKeysAudioProcessorEditor(Aggrega
       sliderLookAndFeel(std::make_unique<ImageSliderLookAndFeel>(sliderImage)),
       comboBoxLookAndFeel(std::make_unique<ImageComboBoxLookAndFeel>()),
       buttonLookAndFeel(std::make_unique<ImageButtonLookAndFeel>()),
+      modeToggleLookAndFeel(std::make_unique<ModeToggleLookAndFeel>()),
       waveformDisplay(std::make_unique<WaveformDisplay>())
 {
     setSize(1100, 660);
@@ -432,8 +489,10 @@ AggregatronKeysAudioProcessorEditor::AggregatronKeysAudioProcessorEditor(Aggrega
     configureSlider(reverbDampingControl, "reverbDamping", "Rev Damp");
 
     styleModeButton(monoModeButton);
+    monoModeButton.setLookAndFeel(modeToggleLookAndFeel.get());
     monoModeButton.setButtonText("Mono");
     monoModeButton.setClickingTogglesState(true);
+    monoModeButton.setToggleState(false, juce::dontSendNotification);
     monoModeButton.setTooltip("Play monophonically with legato glide");
     disableKeyboardFocus(monoModeButton);
     monoModeAttachment = std::make_unique<ButtonAttachment>(audioProcessor.parameters, "monoMode", monoModeButton);
@@ -469,7 +528,7 @@ AggregatronKeysAudioProcessorEditor::AggregatronKeysAudioProcessorEditor(Aggrega
     addAndMakeVisible(keyboardComponent);
 
     grabKeyboardFocus();
-    startTimerHz(120);
+    startTimerHz(240);
 }
 
 AggregatronKeysAudioProcessorEditor::~AggregatronKeysAudioProcessorEditor()
@@ -477,6 +536,7 @@ AggregatronKeysAudioProcessorEditor::~AggregatronKeysAudioProcessorEditor()
     keyboardComponent.removeKeyListener(this);
     removeKeyListener(this);
     releaseComputerKeyboardNotes();
+    monoModeButton.setLookAndFeel(nullptr);
     savePresetButton.setLookAndFeel(nullptr);
     loadPresetButton.setLookAndFeel(nullptr);
     presetMenu.setLookAndFeel(nullptr);
@@ -926,8 +986,6 @@ void AggregatronKeysAudioProcessorEditor::resized()
     savePresetLabel.setBounds(saveBounds);
     auto presetBounds = buttonArea.removeFromRight(190).reduced(4, 2);
     presetMenu.setBounds(presetBounds);
-    auto monoBounds = buttonArea.removeFromRight(116).reduced(8, 6);
-    monoModeButton.setBounds(monoBounds);
     hintLabel.setBounds(header);
 
     waveformBounds = area.removeFromTop(86);
@@ -978,7 +1036,10 @@ void AggregatronKeysAudioProcessorEditor::resized()
     ampSectionLabel.setBounds(ampGroupBounds.removeFromTop(26).reduced(8, 0));
     filterSectionLabel.setBounds(filterGroupBounds.removeFromTop(26).reduced(8, 0));
     motionSectionLabel.setBounds(motionGroupBounds.removeFromTop(26).reduced(8, 0));
-    performanceSectionLabel.setBounds(performanceGroupBounds.removeFromTop(26).reduced(8, 0));
+    auto performanceHeader = performanceGroupBounds.removeFromTop(26).reduced(8, 0);
+    auto monoBounds = performanceHeader.removeFromRight(96).reduced(0, 1);
+    performanceSectionLabel.setBounds(performanceHeader);
+    monoModeButton.setBounds(monoBounds);
     fxSectionLabel.setBounds(fxGroupBounds.removeFromTop(26).reduced(8, 0));
 
     auto oscContent = oscGroupBounds.reduced(8, 0);
@@ -995,10 +1056,7 @@ void AggregatronKeysAudioProcessorEditor::resized()
     layoutRow(ampGroupBounds.reduced(8, 0), { &gainControl, &velocityAmpControl, &ampAttackControl, &ampDecayControl, &ampSustainControl, &ampReleaseControl });
     layoutRow(filterGroupBounds.reduced(8, 0), { &filterCutoffControl, &filterResonanceControl, &filterEnvAmountControl, &velocityFilterControl, &filterAttackControl, &filterDecayControl, &filterSustainControl, &filterReleaseControl });
     layoutRow(motionGroupBounds.reduced(8, 0), { &lfoRateControl, &lfoPitchDepthControl, &lfoFilterDepthControl });
-    auto performanceContent = performanceGroupBounds.reduced(8, 0);
-    auto monoButtonArea = performanceContent.removeFromBottom(32).reduced(4, 2);
-    monoModeButton.setBounds(monoButtonArea.removeFromLeft(110));
-    layoutRow(performanceContent, { &glideControl, &polyphonyControl, &driveControl });
+    layoutRow(performanceGroupBounds.reduced(8, 0), { &glideControl, &polyphonyControl, &driveControl });
     layoutRow(fxGroupBounds.reduced(8, 0), { &reverbMixControl, &reverbSizeControl, &reverbDampingControl });
 
     area.removeFromTop(8);

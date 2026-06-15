@@ -29,6 +29,7 @@ private:
     class ImageSliderLookAndFeel;
     class ImageComboBoxLookAndFeel;
     class ImageButtonLookAndFeel;
+    class ModeToggleLookAndFeel;
     class WaveformDisplay;
 
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
@@ -72,6 +73,7 @@ private:
     std::unique_ptr<ImageSliderLookAndFeel> sliderLookAndFeel;
     std::unique_ptr<ImageComboBoxLookAndFeel> comboBoxLookAndFeel;
     std::unique_ptr<ImageButtonLookAndFeel> buttonLookAndFeel;
+    std::unique_ptr<ModeToggleLookAndFeel> modeToggleLookAndFeel;
 
     OutlinedLabel titleLabel;
     OutlinedLabel hintLabel;
@@ -118,7 +120,7 @@ private:
     KnobControl reverbMixControl;
     KnobControl reverbSizeControl;
     KnobControl reverbDampingControl;
-    juce::ToggleButton monoModeButton { "Mono" };
+    juce::TextButton monoModeButton { "Mono" };
     std::unique_ptr<ButtonAttachment> monoModeAttachment;
 
     juce::Slider pitchWheelSlider;

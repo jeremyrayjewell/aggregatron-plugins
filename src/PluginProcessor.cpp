@@ -373,6 +373,8 @@ private:
 class AggregaKeysSynth : public juce::Synthesiser
 {
 public:
+    AggregaKeysSynth() = default;
+
     void setMaximumPlayableVoices(int newMaxVoices) noexcept
     {
         maximumPlayableVoices = juce::jlimit(1, 16, newMaxVoices);
@@ -393,7 +395,10 @@ public:
     void noteOn(int midiChannel, int midiNoteNumber, float velocity) override
     {
         if (! monoMode)
-            return juce::Synthesiser::noteOn(midiChannel, midiNoteNumber, velocity);
+        {
+            juce::Synthesiser::noteOn(midiChannel, midiNoteNumber, velocity);
+            return;
+        }
 
         const auto hadHeldNotes = getLastHeldNote() != nullptr;
         updateHeldNote(midiChannel, midiNoteNumber, velocity);
@@ -670,7 +675,6 @@ void AggregatronKeysAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     captureWaveformSnapshot(buffer);
 
 }
-
 juce::AudioProcessorEditor* AggregatronKeysAudioProcessor::createEditor()
 {
     return new AggregatronKeysAudioProcessorEditor(*this);

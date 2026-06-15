@@ -2,7 +2,7 @@
 
 This repository contains the latest source for four JUCE audio programs:
 
-- `AggregaKeys v0.3`: a MIDI-driven polyphonic synth with a simple control panel
+- `AggregaKeys v0.9`: a MIDI-driven polyphonic synth with a simple control panel
 - `AggregaMap v0.1`: a second JUCE plugin target built from the `samplemap/` sources
 - `AggregaScale v0.1`: a scale visualiser that can be set manually or inferred from an audio file
 - `AggregaVocoder v0.2`: a live vocal pitch-correction effect that snaps input to the nearest note in a chosen key and scale
@@ -43,7 +43,7 @@ cmake --build build --config Debug
 
 Artifacts will be generated under `build/` for all products:
 
-- `AggregaKeys v0.3`
+- `AggregaKeys v0.9`
 - `AggregaMap v0.1`
 - `AggregaScale v0.1`
 - `AggregaVocoder v0.1`
@@ -56,7 +56,7 @@ Artifacts will be generated under `build/` for all products:
 
 ## Current targets
 
-### AggregaKeys v0.3
+### AggregaKeys v0.9
 
 - polyphonic sine-wave synth
 - ADSR envelope

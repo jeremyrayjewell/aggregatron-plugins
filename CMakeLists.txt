@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(AggregatronPlugins VERSION 0.3.0)
+project(AggregatronPlugins VERSION 0.9.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,7 +37,7 @@ juce_add_plugin(AggregatronKeys
     PLUGIN_MANUFACTURER_CODE Aggr
     PLUGIN_CODE Aky2
     FORMATS Standalone VST3
-    PRODUCT_NAME "AggregaKeys v0.3"
+    PRODUCT_NAME "AggregaKeys v0.9"
 )
 
 juce_generate_juce_header(AggregatronKeys)

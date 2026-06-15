@@ -40,7 +40,7 @@ public:
     void setUiModWheel(float normalizedValue) noexcept;
     int getUiPitchWheel() const noexcept { return uiPitchWheelValue.load(); }
     float getUiModWheelNormalized() const noexcept { return static_cast<float>(uiModWheelValue.load()) / 127.0f; }
-    juce::String getVersionString() const { return "v0.3"; }
+    juce::String getVersionString() const { return "v0.9"; }
     bool savePresetToFile(const juce::File& file);
     bool loadPresetFromFile(const juce::File& file);
     bool getWaveformSnapshot(std::vector<float>& dest) const;
