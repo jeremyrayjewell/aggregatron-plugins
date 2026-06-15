@@ -28,6 +28,7 @@ juce_add_binary_data(AggregatronAssets
 juce_add_plugin(AggregatronKeys
     COMPANY_NAME "Aggregatron"
     BUNDLE_ID "com.aggregatron.aggregakeys.v0_2"
+    LV2URI "urn:aggregatron:aggregakeys"
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT FALSE
@@ -36,7 +37,7 @@ juce_add_plugin(AggregatronKeys
     COPY_PLUGIN_AFTER_BUILD FALSE
     PLUGIN_MANUFACTURER_CODE Aggr
     PLUGIN_CODE Aky2
-    FORMATS Standalone VST3
+    FORMATS Standalone LV2 VST3
     PRODUCT_NAME "AggregaKeys v0.9"
 )
 
