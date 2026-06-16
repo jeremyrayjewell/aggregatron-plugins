@@ -1,5 +1,8 @@
 #include "AggregaKeysEngine.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace
 {
 double noteNumberToFrequency(double noteNumber)
@@ -80,8 +83,8 @@ bool SynthSound::appliesToChannel(int)
     return true;
 }
 
-SynthVoice::SynthVoice(juce::AudioProcessorValueTreeState& state)
-    : parameters(state)
+SynthVoice::SynthVoice(const AggregaKeysParameterValues& values)
+    : parameterValues(values)
 {
     filter.setType(juce::dsp::StateVariableTPTFilterType::lowpass);
 }
@@ -163,7 +166,7 @@ void SynthVoice::controllerMoved(int controllerNumber, int newControllerValue)
 
 void SynthVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, int startSample, int numSamples)
 {
-    updateParameters();
+    updateParameters(parameterValues);
     prepareSmoothers();
 
     if (! isVoiceActive())
@@ -242,37 +245,37 @@ void SynthVoice::prepareSmoothers()
     lastPreparedGlideTime = glideTimeSeconds;
 }
 
-void SynthVoice::updateParameters()
+void SynthVoice::updateParameters(const AggregaKeysParameterValues& values)
 {
     juce::ADSR::Parameters ampParams;
-    ampParams.attack = parameters.getRawParameterValue("attack")->load();
-    ampParams.decay = parameters.getRawParameterValue("decay")->load();
-    ampParams.sustain = parameters.getRawParameterValue("sustain")->load();
-    ampParams.release = parameters.getRawParameterValue("release")->load();
+    ampParams.attack = values.attack;
+    ampParams.decay = values.decay;
+    ampParams.sustain = values.sustain;
+    ampParams.release = values.release;
     ampEnvelope.setParameters(ampParams);
 
     juce::ADSR::Parameters filterParams;
-    filterParams.attack = parameters.getRawParameterValue("filterAttack")->load();
-    filterParams.decay = parameters.getRawParameterValue("filterDecay")->load();
-    filterParams.sustain = parameters.getRawParameterValue("filterSustain")->load();
-    filterParams.release = parameters.getRawParameterValue("filterRelease")->load();
+    filterParams.attack = values.filterAttack;
+    filterParams.decay = values.filterDecay;
+    filterParams.sustain = values.filterSustain;
+    filterParams.release = values.filterRelease;
     filterEnvelope.setParameters(filterParams);
 
-    osc1Waveform = static_cast<Waveform>(juce::jlimit(0, 3, juce::roundToInt(parameters.getRawParameterValue("osc1Wave")->load())));
-    osc2Waveform = static_cast<Waveform>(juce::jlimit(0, 3, juce::roundToInt(parameters.getRawParameterValue("osc2Wave")->load())));
-    oscMix = parameters.getRawParameterValue("oscMix")->load();
-    osc2DetuneSemitones = parameters.getRawParameterValue("osc2Detune")->load();
-    osc2FineCents = parameters.getRawParameterValue("osc2Fine")->load();
-    filterCutoffHz = parameters.getRawParameterValue("filterCutoff")->load();
-    filterResonance = parameters.getRawParameterValue("filterResonance")->load();
-    filterEnvAmountHz = parameters.getRawParameterValue("filterEnvAmount")->load();
-    velocityFilterAmountHz = parameters.getRawParameterValue("velocityFilter")->load();
-    lfoRateHz = parameters.getRawParameterValue("lfoRate")->load();
-    lfoDepthSemitones = parameters.getRawParameterValue("lfoPitchDepth")->load();
-    lfoFilterAmountHz = parameters.getRawParameterValue("lfoFilterDepth")->load();
-    glideTimeSeconds = parameters.getRawParameterValue("glide")->load();
-    velocityAmpAmount = parameters.getRawParameterValue("velocityAmp")->load();
-    driveAmount = juce::jmap(parameters.getRawParameterValue("drive")->load(), 1.0f, 8.0f);
+    osc1Waveform = static_cast<Waveform>(juce::jlimit(0, 3, values.osc1Wave));
+    osc2Waveform = static_cast<Waveform>(juce::jlimit(0, 3, values.osc2Wave));
+    oscMix = values.oscMix;
+    osc2DetuneSemitones = values.osc2Detune;
+    osc2FineCents = values.osc2Fine;
+    filterCutoffHz = values.filterCutoff;
+    filterResonance = values.filterResonance;
+    filterEnvAmountHz = values.filterEnvAmount;
+    velocityFilterAmountHz = values.velocityFilter;
+    lfoRateHz = values.lfoRate;
+    lfoDepthSemitones = values.lfoPitchDepth;
+    lfoFilterAmountHz = values.lfoFilterDepth;
+    glideTimeSeconds = values.glide;
+    velocityAmpAmount = values.velocityAmp;
+    driveAmount = juce::jmap(values.drive, 1.0f, 8.0f);
 
     if (lastPreparedSampleRate > 0.0)
     {
@@ -319,6 +322,13 @@ float SynthVoice::renderOscillatorSample(Waveform waveform, float phase, float p
         default:
             return sawWave(phase, phaseIncrement);
     }
+}
+
+void AggregaKeysSynth::setParameterValues(const AggregaKeysParameterValues& values)
+{
+    parameterValues = values;
+    setMaximumPlayableVoices(parameterValues.polyphony);
+    setMonoMode(parameterValues.monoMode);
 }
 
 void AggregaKeysSynth::setMaximumPlayableVoices(int newMaxVoices) noexcept
@@ -420,7 +430,7 @@ juce::SynthesiserVoice* AggregaKeysSynth::findFreeVoice(juce::SynthesiserSound* 
     if (! stealIfNoneAvailable)
         return nullptr;
 
-    SynthesiserVoice* oldestVoice = nullptr;
+    juce::SynthesiserVoice* oldestVoice = nullptr;
 
     for (int i = 0; i < eligibleVoices; ++i)
     {

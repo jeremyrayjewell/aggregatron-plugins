@@ -2,6 +2,8 @@
 
 #include <JuceHeader.h>
 #include "AggregaKeysEngine.h"
+#include "AggregaKeysParameters.h"
+
 class AggregatronKeysAudioProcessor : public juce::AudioProcessor
 {
 public:
@@ -48,8 +50,8 @@ public:
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
-    void syncVoiceCount();
-    void updateEffectParameters();
+    AggregaKeysParameterValues createParameterValuesSnapshot() const;
+    void updateEffectParameters(const AggregaKeysParameterValues& values);
     void captureWaveformSnapshot(const juce::AudioBuffer<float>& buffer);
 
     std::unique_ptr<AggregaKeysSynth> synth;

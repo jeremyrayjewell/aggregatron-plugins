@@ -47,6 +47,7 @@ target_sources(AggregatronKeys
     PRIVATE
         src/AggregaKeysEngine.cpp
         src/AggregaKeysEngine.h
+        src/AggregaKeysParameters.h
         src/PluginEditor.cpp
         src/PluginEditor.h
         src/PluginProcessor.cpp

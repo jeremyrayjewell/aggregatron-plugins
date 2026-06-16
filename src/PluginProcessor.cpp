@@ -6,11 +6,10 @@ AggregatronKeysAudioProcessor::AggregatronKeysAudioProcessor()
       parameters(*this, nullptr, "PARAMETERS", createParameterLayout())
 {
     synth = std::make_unique<AggregaKeysSynth>();
-    syncVoiceCount();
     synth->addSound(new SynthSound());
 
     for (int i = 0; i < 16; ++i)
-        synth->addVoice(new SynthVoice(parameters));
+        synth->addVoice(new SynthVoice(synth->getParameterValues()));
 }
 
 void AggregatronKeysAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
@@ -23,9 +22,11 @@ void AggregatronKeysAudioProcessor::prepareToPlay(double sampleRate, int samples
     reverb.reset();
     gainSmoothed.reset(sampleRate, 0.02);
     reverbMixSmoothed.reset(sampleRate, 0.02);
-    gainSmoothed.setCurrentAndTargetValue(parameters.getRawParameterValue("gain")->load());
-    reverbMixSmoothed.setCurrentAndTargetValue(parameters.getRawParameterValue("reverbMix")->load());
-    updateEffectParameters();
+    const auto parameterValues = createParameterValuesSnapshot();
+    synth->setParameterValues(parameterValues);
+    gainSmoothed.setCurrentAndTargetValue(parameterValues.gain);
+    reverbMixSmoothed.setCurrentAndTargetValue(parameterValues.reverbMix);
+    updateEffectParameters(parameterValues);
 }
 
 void AggregatronKeysAudioProcessor::releaseResources()
@@ -43,8 +44,9 @@ bool AggregatronKeysAudioProcessor::isBusesLayoutSupported(const BusesLayout& la
 void AggregatronKeysAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
-    syncVoiceCount();
-    updateEffectParameters();
+    const auto parameterValues = createParameterValuesSnapshot();
+    synth->setParameterValues(parameterValues);
+    updateEffectParameters(parameterValues);
 
     for (auto channel = 0; channel < buffer.getNumChannels(); ++channel)
         buffer.clear(channel, 0, buffer.getNumSamples());
@@ -86,8 +88,8 @@ void AggregatronKeysAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     synthBuffer.clear();
     synth->renderNextBlock(synthBuffer, midiMessages, 0, buffer.getNumSamples());
 
-    gainSmoothed.setTargetValue(parameters.getRawParameterValue("gain")->load());
-    reverbMixSmoothed.setTargetValue(parameters.getRawParameterValue("reverbMix")->load());
+    gainSmoothed.setTargetValue(parameterValues.gain);
+    reverbMixSmoothed.setTargetValue(parameterValues.reverbMix);
 
     for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
         wetBuffer.copyFrom(channel, 0, synthBuffer, channel, 0, buffer.getNumSamples());
@@ -238,19 +240,46 @@ bool AggregatronKeysAudioProcessor::getWaveformSnapshot(std::vector<float>& dest
     return true;
 }
 
-void AggregatronKeysAudioProcessor::syncVoiceCount()
+AggregaKeysParameterValues AggregatronKeysAudioProcessor::createParameterValuesSnapshot() const
 {
-    const auto desiredVoices = juce::jlimit(1, 16, juce::roundToInt(parameters.getRawParameterValue("polyphony")->load()));
-    const auto monoModeEnabled = parameters.getRawParameterValue("monoMode")->load() >= 0.5f;
-    synth->setMaximumPlayableVoices(desiredVoices);
-    synth->setMonoMode(monoModeEnabled);
+    AggregaKeysParameterValues values;
+    values.gain = parameters.getRawParameterValue("gain")->load();
+    values.velocityAmp = parameters.getRawParameterValue("velocityAmp")->load();
+    values.attack = parameters.getRawParameterValue("attack")->load();
+    values.decay = parameters.getRawParameterValue("decay")->load();
+    values.sustain = parameters.getRawParameterValue("sustain")->load();
+    values.release = parameters.getRawParameterValue("release")->load();
+    values.osc1Wave = juce::roundToInt(parameters.getRawParameterValue("osc1Wave")->load());
+    values.osc2Wave = juce::roundToInt(parameters.getRawParameterValue("osc2Wave")->load());
+    values.oscMix = parameters.getRawParameterValue("oscMix")->load();
+    values.osc2Detune = parameters.getRawParameterValue("osc2Detune")->load();
+    values.osc2Fine = parameters.getRawParameterValue("osc2Fine")->load();
+    values.filterCutoff = parameters.getRawParameterValue("filterCutoff")->load();
+    values.filterResonance = parameters.getRawParameterValue("filterResonance")->load();
+    values.filterEnvAmount = parameters.getRawParameterValue("filterEnvAmount")->load();
+    values.velocityFilter = parameters.getRawParameterValue("velocityFilter")->load();
+    values.filterAttack = parameters.getRawParameterValue("filterAttack")->load();
+    values.filterDecay = parameters.getRawParameterValue("filterDecay")->load();
+    values.filterSustain = parameters.getRawParameterValue("filterSustain")->load();
+    values.filterRelease = parameters.getRawParameterValue("filterRelease")->load();
+    values.lfoRate = parameters.getRawParameterValue("lfoRate")->load();
+    values.lfoPitchDepth = parameters.getRawParameterValue("lfoPitchDepth")->load();
+    values.lfoFilterDepth = parameters.getRawParameterValue("lfoFilterDepth")->load();
+    values.glide = parameters.getRawParameterValue("glide")->load();
+    values.polyphony = juce::jlimit(1, 16, juce::roundToInt(parameters.getRawParameterValue("polyphony")->load()));
+    values.monoMode = parameters.getRawParameterValue("monoMode")->load() >= 0.5f;
+    values.drive = parameters.getRawParameterValue("drive")->load();
+    values.reverbMix = parameters.getRawParameterValue("reverbMix")->load();
+    values.reverbSize = parameters.getRawParameterValue("reverbSize")->load();
+    values.reverbDamping = parameters.getRawParameterValue("reverbDamping")->load();
+    return values;
 }
 
-void AggregatronKeysAudioProcessor::updateEffectParameters()
+void AggregatronKeysAudioProcessor::updateEffectParameters(const AggregaKeysParameterValues& values)
 {
     juce::Reverb::Parameters params;
-    params.roomSize = parameters.getRawParameterValue("reverbSize")->load();
-    params.damping = parameters.getRawParameterValue("reverbDamping")->load();
+    params.roomSize = values.reverbSize;
+    params.damping = values.reverbDamping;
     params.wetLevel = 1.0f;
     params.dryLevel = 0.0f;
     params.width = 1.0f;

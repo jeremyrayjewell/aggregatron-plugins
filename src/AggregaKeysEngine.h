@@ -1,6 +1,9 @@
 #pragma once
 
-#include <JuceHeader.h>
+#include "AggregaKeysParameters.h"
+
+#include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_dsp/juce_dsp.h>
 
 #include <vector>
 
@@ -22,7 +25,7 @@ public:
         sine
     };
 
-    explicit SynthVoice(juce::AudioProcessorValueTreeState& state);
+    explicit SynthVoice(const AggregaKeysParameterValues& values);
 
     bool canPlaySound(juce::SynthesiserSound* sound) override;
     void setCurrentPlaybackSampleRate(double newRate) override;
@@ -37,11 +40,11 @@ private:
     static float wrapPhase(float phase);
     void updatePitch();
     void prepareSmoothers();
-    void updateParameters();
+    void updateParameters(const AggregaKeysParameterValues& values);
     void updateGlideTarget(bool shouldGlide);
     static float renderOscillatorSample(Waveform waveform, float phase, float phaseIncrement) noexcept;
 
-    juce::AudioProcessorValueTreeState& parameters;
+    const AggregaKeysParameterValues& parameterValues;
     juce::ADSR ampEnvelope;
     juce::ADSR filterEnvelope;
     juce::dsp::StateVariableTPTFilter<float> filter;
@@ -86,16 +89,18 @@ class AggregaKeysSynth : public juce::Synthesiser
 public:
     AggregaKeysSynth() = default;
 
+    void setParameterValues(const AggregaKeysParameterValues& values);
+    const AggregaKeysParameterValues& getParameterValues() const noexcept { return parameterValues; }
     void setMaximumPlayableVoices(int newMaxVoices) noexcept;
     void setMonoMode(bool shouldBeMono);
     void noteOn(int midiChannel, int midiNoteNumber, float velocity) override;
     void noteOff(int midiChannel, int midiNoteNumber, float velocity, bool allowTailOff) override;
 
 protected:
-    SynthesiserVoice* findFreeVoice(juce::SynthesiserSound* soundToPlay,
-                                    int midiChannel,
-                                    int midiNoteNumber,
-                                    bool stealIfNoneAvailable) const override;
+    juce::SynthesiserVoice* findFreeVoice(juce::SynthesiserSound* soundToPlay,
+                                          int midiChannel,
+                                          int midiNoteNumber,
+                                          bool stealIfNoneAvailable) const override;
 
 private:
     struct HeldNote
@@ -113,6 +118,7 @@ private:
     SynthVoice* getPrimaryVoice() const;
 
     std::vector<HeldNote> heldNotes;
+    AggregaKeysParameterValues parameterValues {};
     int maximumPlayableVoices = 8;
     bool monoMode = false;
 };
