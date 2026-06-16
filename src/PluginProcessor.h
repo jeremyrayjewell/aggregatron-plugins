@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "AggregaKeysEngine.h"
 class AggregatronKeysAudioProcessor : public juce::AudioProcessor
 {
 public:
@@ -51,7 +52,7 @@ private:
     void updateEffectParameters();
     void captureWaveformSnapshot(const juce::AudioBuffer<float>& buffer);
 
-    std::unique_ptr<juce::Synthesiser> synth;
+    std::unique_ptr<AggregaKeysSynth> synth;
     juce::MidiKeyboardState keyboardState;
     juce::Reverb reverb;
     juce::AudioBuffer<float> synthBuffer;
